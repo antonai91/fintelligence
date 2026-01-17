@@ -1,0 +1,2 @@
+# fintelligence
+AI financial analyst
