@@ -37,6 +37,10 @@ MODEL_EXTRACTOR = "gpt-4o-mini"
 # Options: "gpt-4o-mini" (faster, cheaper) or "gpt-4o" (higher quality)
 MODEL_QA = "gpt-4o-mini"
 
+# Model for metadata extraction from document content
+# Uses GPT-4 for high-quality metadata extraction
+MODEL_METADATA = "gpt-4o"
+
 # Model for embeddings
 # Using BAAI/bge-small-en-v1.5 (lightweight, fast, excellent for RAG)
 MODEL_EMBEDDING = "BAAI/bge-small-en-v1.5"
@@ -140,6 +144,7 @@ def print_config():
     print("=" * 60)
     print(f"Extractor Model: {MODEL_EXTRACTOR}")
     print(f"Q&A Model: {MODEL_QA}")
+    print(f"Metadata Model: {MODEL_METADATA}")
     print(f"Embedding Model: {MODEL_EMBEDDING}")
     print(f"Temperature: {TEMPERATURE}")
     print(f"Max Text Chars: {MAX_TEXT_CHARS:,}")

@@ -22,14 +22,93 @@ class ProcessedDocumentLoader:
     def __init__(self, chunk_size: int = 512, overlap: int = 50):
         self.chunk_size = chunk_size
         self.overlap = overlap
+        self._openai_client = None
+        self._metadata_cache = {}  # Cache to avoid re-extracting for same files
         
+    @property
+    def openai_client(self):
+        """Lazy initialization of OpenAI client for metadata extraction"""
+        if self._openai_client is None:
+            api_key = config.get_openai_api_key()
+            self._openai_client = OpenAI(api_key=api_key)
+        return self._openai_client
+        
+    def _extract_metadata_with_llm(self, content: str, filename: str) -> Dict[str, str]:
+        """
+        Extract metadata from document content using LLM (GPT-4)
+        
+        This analyzes the actual content of the document to extract:
+        - Quarter (Q1, Q2, Q3, Q4)
+        - Year (2024, 2025, etc.)
+        - Document type (report, transcript, presentation, financial-statements)
+        - Company name
+        - A descriptive title
+        """
+        # Use first ~3000 chars for metadata extraction (usually contains title, date, etc.)
+        sample_content = content[:3000] if len(content) > 3000 else content
+        
+        # Remove _text.txt suffix for base filename
+        base_name = filename.replace('_text.txt', '').replace('.txt', '')
+        
+        prompt = f"""Analyze this financial document and extract the following metadata.
+Return ONLY a JSON object with these fields (no markdown, no explanation):
+
+{{
+    "quarter": "Q1" or "Q2" or "Q3" or "Q4" or null (if not quarterly),
+    "year": "2024" (4-digit year string) or null,
+    "doc_type": one of ["report", "transcript", "presentation", "financial-statements", "annual-report", "other"],
+    "company": "Company Name" or null,
+    "title": "A short descriptive title for this document"
+}}
+
+Filename: {base_name}
+
+Document content (first portion):
+{sample_content}
+
+JSON:"""
+
+        try:
+            response = self.openai_client.chat.completions.create(
+                model=config.MODEL_METADATA,
+                messages=[
+                    {"role": "system", "content": "You are a metadata extraction assistant. Extract structured metadata from financial documents. Return only valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                max_tokens=200
+            )
+            
+            result = response.choices[0].message.content.strip()
+            
+            # Clean up any markdown formatting
+            if result.startswith("```"):
+                result = re.sub(r'^```(?:json)?\n?', '', result)
+                result = re.sub(r'\n?```$', '', result)
+            
+            import json
+            metadata = json.loads(result)
+            
+            # Ensure all expected fields exist
+            return {
+                "title": metadata.get("title") or base_name,
+                "quarter": metadata.get("quarter"),
+                "year": metadata.get("year"),
+                "doc_type": metadata.get("doc_type") or "unknown",
+                "company": metadata.get("company")
+            }
+            
+        except Exception as e:
+            print(f"  Warning: LLM metadata extraction failed for {filename}: {e}")
+            # Fallback to filename-based extraction
+            return self._extract_metadata_from_filename(filename)
+    
     def _extract_metadata_from_filename(self, filename: str) -> Dict[str, str]:
         """
-        Extract metadata from filename
+        Fallback: Extract metadata from filename using regex patterns
         
         Examples:
             Q1-2025-report_text.txt -> {quarter: Q1, year: 2025, doc_type: report}
-            Financial-statements-and-review-Q4-2024-CMU-2025_text.txt -> {quarter: Q4, year: 2024, doc_type: financial-statements}
         """
         # Remove _text.txt suffix
         base_name = filename.replace('_text.txt', '').replace('.txt', '')
@@ -38,7 +117,8 @@ class ProcessedDocumentLoader:
             "title": base_name,
             "quarter": None,
             "year": None,
-            "doc_type": "unknown"
+            "doc_type": "unknown",
+            "company": None
         }
         
         # Extract quarter (Q1, Q2, Q3, Q4)
@@ -61,10 +141,6 @@ class ProcessedDocumentLoader:
             metadata["doc_type"] = "report"
         elif 'financial' in lower_name or 'statement' in lower_name:
             metadata["doc_type"] = "financial-statements"
-        
-        # Create a nice title
-        if metadata["quarter"] and metadata["year"]:
-            metadata["title"] = f"{metadata['quarter']} {metadata['year']} {metadata['doc_type'].title()}"
         
         return metadata
         
@@ -101,8 +177,10 @@ class ProcessedDocumentLoader:
         # Read the processed text
         text = file_path.read_text(encoding='utf-8')
         
-        # Extract metadata from filename
-        file_metadata = self._extract_metadata_from_filename(file_path.name)
+        # Extract metadata using LLM (analyzes content, not just filename)
+        print(f"  Extracting metadata with LLM...")
+        file_metadata = self._extract_metadata_with_llm(text, file_path.name)
+        print(f"  -> {file_metadata.get('title')} | {file_metadata.get('quarter')} {file_metadata.get('year')} | {file_metadata.get('doc_type')}")
         
         chunks = []
         
@@ -118,7 +196,7 @@ class ProcessedDocumentLoader:
             if len(chunk_words) < 50:
                 continue
             
-            # Create chunk with rich metadata
+            # Create chunk with rich metadata (including company from LLM)
             chunks.append({
                 "text": chunk_text,
                 "metadata": {
@@ -127,6 +205,7 @@ class ProcessedDocumentLoader:
                     "doc_type": file_metadata["doc_type"],
                     "quarter": file_metadata["quarter"],
                     "year": file_metadata["year"],
+                    "company": file_metadata.get("company"),
                     "path": str(file_path),
                     "chunk_id": chunk_id
                 }
