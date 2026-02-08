@@ -117,15 +117,11 @@ All dependencies are managed via the `pyproject.toml` file.
 
 ## PDF Extractor
 
-The extractor processes downloaded PDFs to extract clean text and tables using OpenAI's API.
+The extractor uses `pdfplumber` to process downloaded PDFs and the OpenAI API to clean and structure the data, extracting:
 
-### Setup
-
-Set your OpenAI API key:
-
-```bash
-export OPENAI_API_KEY="your-api-key-here"
-```
+- Clean text content
+- Structured tables (CSV)
+- Metadata
 
 ### Usage
 
@@ -141,35 +137,16 @@ Process all PDFs in `data/raw`:
 uv run python scripts/extractor.py
 ```
 
-Use GPT-4o for higher quality (more expensive):
-
-```bash
-uv run python scripts/extractor.py --model gpt-4o
-```
-
-Extract only text (skip tables):
-
-```bash
-uv run python scripts/extractor.py --skip-tables
-```
-
-Extract only tables (skip text):
-
-```bash
-uv run python scripts/extractor.py --skip-text
-```
-
 ### Output
 
 The extractor creates:
 
-- **Text files**: `data/processed/{filename}_text.txt` - Cleaned text ready for embedding
-- **CSV files**: `data/processed/{filename}_table_{n}.csv` - Extracted tables
+- **Text files**: `data/processed/{filename}_text.txt`
+- **Tables**: `data/processed/{filename}_table_{n}.csv`
 
-### Features
+## Documentation
 
-- **OpenAI-powered cleaning**: Uses GPT-4o-mini (or GPT-4o) to clean and structure extracted content
-- **Smart text processing**: Removes headers, footers, page numbers while preserving meaningful content
-- **Table extraction**: Detects and extracts tables with proper CSV formatting
-- **Batch processing**: Process single files or entire directories
-- **Error handling**: Robust error handling with fallback to raw data if API fails
+Comprehensive documentation is available in the `docs/` directory:
+
+- [**System Architecture**](docs/architecture.md): High-level design and module breakdown.
+- [**Cheat Sheet**](docs/cheat_sheet.md): Quick reference for common commands.
