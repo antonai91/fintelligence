@@ -8,10 +8,10 @@ import sys
 import time
 from pathlib import Path
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the src directory to sys.path so we can import the package
+sys.path.append(str(Path(__file__).parents[1] / "src"))
 
-from scripts.qa_engine import QAEngine
+from investor_relations_scraper import QAEngine
 
 def test_persistent_storage():
     """Test that the persistent storage works correctly"""

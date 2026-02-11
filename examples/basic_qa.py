@@ -1,8 +1,12 @@
 
 import os
 import sys
-from scripts.qa_engine import QAEngine
-import config
+from pathlib import Path
+
+# Add the src directory to sys.path so we can import the package
+sys.path.append(str(Path(__file__).parents[1] / "src"))
+
+from investor_relations_scraper import QAEngine, config
 
 def main():
     # Check if OPENAI_API_KEY is set (config.py loads from .env automatically)

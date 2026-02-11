@@ -6,21 +6,23 @@ then processes them with OpenAI API to create clean, embedding-ready text
 and well-formatted CSV files.
 """
 
-import asyncio
-import os
-import re
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple
-import pdfplumber
-import pandas as pd
-from openai import OpenAI
 import argparse
-import json
+import re
 import sys
+from io import StringIO
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-# Add parent directory to path to import config
-sys.path.insert(0, str(Path(__file__).parent.parent))
-import config
+import pandas as pd
+import pdfplumber
+from openai import OpenAI
+
+from . import config
+
+# Constants
+MIN_TABLE_ROWS = 2
+TABLE_INDEX_START = 1
+PAGE_NUMBER_START = 1
 
 
 class PDFExtractor:
@@ -59,69 +61,76 @@ class PDFExtractor:
         
     def extract_text_from_pdf(self, pdf_path: Path) -> str:
         """
-        Extract raw text from PDF file
+        Extract raw text from PDF file.
         
         Args:
             pdf_path: Path to PDF file
             
         Returns:
-            Extracted text as string
+            Extracted text as string, or empty string if extraction fails
         """
         text_content = []
         
         try:
             with pdfplumber.open(pdf_path) as pdf:
-                for page_num, page in enumerate(pdf.pages, 1):
+                for page_num, page in enumerate(pdf.pages, PAGE_NUMBER_START):
                     text = page.extract_text()
                     if text:
                         text_content.append(f"--- Page {page_num} ---\n{text}")
                         
             return "\n\n".join(text_content)
+        except (IOError, OSError) as e:
+            print(f"✗ Error reading PDF file {pdf_path.name}: {e}")
+            return ""
         except Exception as e:
-            print(f"✗ Error extracting text from {pdf_path.name}: {str(e)}")
+            print(f"✗ Unexpected error extracting text from {pdf_path.name}: {e}")
             return ""
     
     def extract_tables_from_pdf(self, pdf_path: Path) -> List[Tuple[int, pd.DataFrame]]:
         """
-        Extract tables from PDF file
+        Extract tables from PDF file.
         
         Args:
             pdf_path: Path to PDF file
             
         Returns:
-            List of tuples (page_number, DataFrame)
+            List of tuples (page_number, DataFrame), or empty list if extraction fails
         """
         tables = []
         
         try:
             with pdfplumber.open(pdf_path) as pdf:
-                for page_num, page in enumerate(pdf.pages, 1):
+                for page_num, page in enumerate(pdf.pages, PAGE_NUMBER_START):
                     page_tables = page.extract_tables()
                     
                     for table_data in page_tables:
-                        if table_data and len(table_data) > 0:
-                            # Convert to DataFrame
-                            df = pd.DataFrame(table_data)
+                        if not table_data:
+                            continue
                             
-                            # Skip empty tables
-                            if not df.empty and df.shape[0] > 1:
-                                tables.append((page_num, df))
+                        df = pd.DataFrame(table_data)
+                        
+                        # Skip empty or single-row tables
+                        if not df.empty and df.shape[0] >= MIN_TABLE_ROWS:
+                            tables.append((page_num, df))
                                 
             return tables
+        except (IOError, OSError) as e:
+            print(f"✗ Error reading PDF file {pdf_path.name}: {e}")
+            return []
         except Exception as e:
-            print(f"✗ Error extracting tables from {pdf_path.name}: {str(e)}")
+            print(f"✗ Unexpected error extracting tables from {pdf_path.name}: {e}")
             return []
     
     def clean_text_with_openai(self, text: str, filename: str) -> str:
         """
-        Clean and process text using OpenAI API
+        Clean and process text using OpenAI API.
         
         Args:
             text: Raw extracted text
             filename: Name of the source file (for context)
             
         Returns:
-            Cleaned text ready for embedding
+            Cleaned text ready for embedding, or original text if cleaning fails
         """
         if not text.strip():
             return ""
@@ -132,20 +141,7 @@ class PDFExtractor:
             print(f"  ⚠ Text is very long ({len(text)} chars), truncating to {max_chars} chars")
             text = text[:max_chars]
         
-        prompt = f"""You are processing a financial report PDF ({filename}) for text embedding and semantic search.
-
-Your task:
-1. Remove headers, footers, page numbers, and navigation elements
-2. Remove formatting artifacts and excessive whitespace
-3. Preserve all meaningful financial data, metrics, and narrative content
-4. Maintain logical structure and paragraph breaks
-5. Keep section headings and important labels
-6. Preserve numbers, dates, and financial figures exactly as they appear
-
-Return ONLY the cleaned text, without any explanations or metadata.
-
-Raw text:
-{text}"""
+        prompt = self._build_text_cleaning_prompt(filename, text)
 
         try:
             response = self.client.chat.completions.create(
@@ -161,13 +157,30 @@ Raw text:
             return cleaned_text
             
         except Exception as e:
-            print(f"  ✗ Error cleaning text with OpenAI: {str(e)}")
-            print(f"  ⚠ Falling back to raw text")
+            print(f"  ✗ Error cleaning text with OpenAI: {e}")
+            print("  ⚠ Falling back to raw text")
             return text
+    
+    def _build_text_cleaning_prompt(self, filename: str, text: str) -> str:
+        """Build the prompt for text cleaning."""
+        return f"""You are processing a financial report PDF ({filename}) for text embedding and semantic search.
+
+Your task:
+1. Remove headers, footers, page numbers, and navigation elements
+2. Remove formatting artifacts and excessive whitespace
+3. Preserve all meaningful financial data, metrics, and narrative content
+4. Maintain logical structure and paragraph breaks
+5. Keep section headings and important labels
+6. Preserve numbers, dates, and financial figures exactly as they appear
+
+Return ONLY the cleaned text, without any explanations or metadata.
+
+Raw text:
+{text}"""
     
     def process_table_with_openai(self, df: pd.DataFrame, page_num: int, table_num: int) -> Optional[pd.DataFrame]:
         """
-        Clean and format table using OpenAI API
+        Clean and format table using OpenAI API.
         
         Args:
             df: DataFrame containing table data
@@ -175,13 +188,36 @@ Raw text:
             table_num: Table number on the page
             
         Returns:
-            Cleaned DataFrame or None if processing fails
+            Cleaned DataFrame, or original DataFrame if processing fails
         """
         try:
-            # Convert DataFrame to a readable format for OpenAI
             table_str = df.to_string(index=False, na_rep='')
+            prompt = self._build_table_cleaning_prompt(page_num, table_str)
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a financial data processing assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=config.TEMPERATURE,
+            )
             
-            prompt = f"""You are processing a table from page {page_num} of a financial report PDF.
+            csv_content = response.choices[0].message.content.strip()
+            csv_content = self._clean_markdown_code_blocks(csv_content)
+            
+            # Parse CSV back into DataFrame
+            cleaned_df = pd.read_csv(StringIO(csv_content))
+            return cleaned_df
+            
+        except Exception as e:
+            print(f"  ✗ Error processing table with OpenAI: {e}")
+            print("  ⚠ Falling back to raw table data")
+            return df
+    
+    def _build_table_cleaning_prompt(self, page_num: int, table_str: str) -> str:
+        """Build the prompt for table cleaning."""
+        return f"""You are processing a table from page {page_num} of a financial report PDF.
 
 Your task:
 1. Clean the table data by removing artifacts and formatting issues
@@ -196,42 +232,22 @@ Original table:
 {table_str}
 
 Return ONLY the CSV data (with headers), nothing else."""
-
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a financial data processing assistant."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=config.TEMPERATURE,
-            )
-            
-            csv_content = response.choices[0].message.content.strip()
-            
-            # Remove markdown code blocks if present
-            csv_content = re.sub(r'^```csv\n', '', csv_content)
-            csv_content = re.sub(r'^```\n', '', csv_content)
-            csv_content = re.sub(r'\n```$', '', csv_content)
-            
-            # Parse CSV back into DataFrame
-            from io import StringIO
-            cleaned_df = pd.read_csv(StringIO(csv_content))
-            
-            return cleaned_df
-            
-        except Exception as e:
-            print(f"  ✗ Error processing table with OpenAI: {str(e)}")
-            print(f"  ⚠ Falling back to raw table data")
-            return df
+    
+    def _clean_markdown_code_blocks(self, content: str) -> str:
+        """Remove markdown code block markers from content."""
+        content = re.sub(r'^```csv\n', '', content)
+        content = re.sub(r'^```\n', '', content)
+        content = re.sub(r'\n```$', '', content)
+        return content
     
     def process_pdf(
         self,
         pdf_path: Path,
         skip_text: bool = False,
         skip_tables: bool = False
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """
-        Process a single PDF file
+        Process a single PDF file.
         
         Args:
             pdf_path: Path to PDF file
@@ -239,7 +255,7 @@ Return ONLY the CSV data (with headers), nothing else."""
             skip_tables: Skip table extraction
             
         Returns:
-            Dictionary with processing results
+            Dictionary with processing results including files created and errors
         """
         print(f"\n📄 Processing: {pdf_path.name}")
         
@@ -253,61 +269,71 @@ Return ONLY the CSV data (with headers), nothing else."""
         
         # Extract and process text
         if not skip_text:
-            print("  📝 Extracting text...")
-            raw_text = self.extract_text_from_pdf(pdf_path)
-            
-            if raw_text:
-                print(f"  🤖 Cleaning text with OpenAI ({self.model})...")
-                cleaned_text = self.clean_text_with_openai(raw_text, pdf_path.name)
-                
-                if cleaned_text:
-                    text_file = self.processed_dir / f"{base_name}_text.txt"
-                    text_file.write_text(cleaned_text, encoding='utf-8')
-                    results["text_file"] = text_file.name
-                    print(f"  ✓ Saved text: {text_file.name}")
-                else:
-                    results["errors"].append("Failed to clean text")
-            else:
-                results["errors"].append("No text extracted")
+            self._process_text(pdf_path, base_name, results)
         
         # Extract and process tables
         if not skip_tables:
-            print("  📊 Extracting tables...")
-            tables = self.extract_tables_from_pdf(pdf_path)
-            
-            if tables:
-                print(f"  Found {len(tables)} tables")
-                
-                for idx, (page_num, df) in enumerate(tables, 1):
-                    print(f"  🤖 Processing table {idx}/{len(tables)} (page {page_num}) with OpenAI...")
-                    
-                    cleaned_df = self.process_table_with_openai(df, page_num, idx)
-                    
-                    if cleaned_df is not None and not cleaned_df.empty:
-                        csv_file = self.processed_dir / f"{base_name}_table_{idx}.csv"
-                        cleaned_df.to_csv(csv_file, index=False)
-                        results["table_files"].append(csv_file.name)
-                        print(f"  ✓ Saved table: {csv_file.name}")
-                    else:
-                        results["errors"].append(f"Failed to process table {idx}")
-            else:
-                print("  ℹ No tables found")
+            self._process_tables(pdf_path, base_name, results)
         
         return results
+    
+    def _process_text(self, pdf_path: Path, base_name: str, results: Dict[str, Any]) -> None:
+        """Extract and process text from PDF."""
+        print("  📝 Extracting text...")
+        raw_text = self.extract_text_from_pdf(pdf_path)
+        
+        if not raw_text:
+            results["errors"].append("No text extracted")
+            return
+            
+        print(f"  🤖 Cleaning text with OpenAI ({self.model})...")
+        cleaned_text = self.clean_text_with_openai(raw_text, pdf_path.name)
+        
+        if cleaned_text:
+            text_file = self.processed_dir / f"{base_name}_text.txt"
+            text_file.write_text(cleaned_text, encoding='utf-8')
+            results["text_file"] = text_file.name
+            print(f"  ✓ Saved text: {text_file.name}")
+        else:
+            results["errors"].append("Failed to clean text")
+    
+    def _process_tables(self, pdf_path: Path, base_name: str, results: Dict[str, Any]) -> None:
+        """Extract and process tables from PDF."""
+        print("  📊 Extracting tables...")
+        tables = self.extract_tables_from_pdf(pdf_path)
+        
+        if not tables:
+            print("  ℹ No tables found")
+            return
+            
+        print(f"  Found {len(tables)} tables")
+        
+        for idx, (page_num, df) in enumerate(tables, TABLE_INDEX_START):
+            print(f"  🤖 Processing table {idx}/{len(tables)} (page {page_num}) with OpenAI...")
+            
+            cleaned_df = self.process_table_with_openai(df, page_num, idx)
+            
+            if cleaned_df is not None and not cleaned_df.empty:
+                csv_file = self.processed_dir / f"{base_name}_table_{idx}.csv"
+                cleaned_df.to_csv(csv_file, index=False)
+                results["table_files"].append(csv_file.name)
+                print(f"  ✓ Saved table: {csv_file.name}")
+            else:
+                results["errors"].append(f"Failed to process table {idx}")
     
     def process_all_pdfs(
         self,
         skip_text: bool = False,
         skip_tables: bool = False,
         file_pattern: str = "*.pdf"
-    ) -> List[Dict[str, any]]:
+    ) -> List[Dict[str, Any]]:
         """
-        Process all PDF files in the raw directory
+        Process all PDF files in the raw directory.
         
         Args:
             skip_text: Skip text extraction
             skip_tables: Skip table extraction
-            file_pattern: Glob pattern for PDF files
+            file_pattern: Glob pattern for PDF files (default: "*.pdf")
             
         Returns:
             List of processing results for each file
@@ -321,19 +347,19 @@ Return ONLY the CSV data (with headers), nothing else."""
         print(f"Found {len(pdf_files)} PDF files to process")
         
         all_results = []
-        
-        for idx, pdf_path in enumerate(pdf_files, 1):
+        for idx, pdf_path in enumerate(pdf_files, TABLE_INDEX_START):
             print(f"\n[{idx}/{len(pdf_files)}]")
             results = self.process_pdf(pdf_path, skip_text, skip_tables)
             all_results.append(results)
         
         return all_results
     
-    def print_summary(self, results: List[Dict[str, any]]):
-        """Print processing summary"""
-        print("\n" + "="*60)
+    def print_summary(self, results: List[Dict[str, Any]]) -> None:
+        """Print processing summary."""
+        separator = "=" * 60
+        print(f"\n{separator}")
         print("PROCESSING SUMMARY")
-        print("="*60)
+        print(separator)
         
         total_files = len(results)
         text_files = sum(1 for r in results if r["text_file"])
@@ -353,8 +379,8 @@ Return ONLY the CSV data (with headers), nothing else."""
                     print(f"  • {r['pdf']}: {', '.join(r['errors'])}")
 
 
-async def main():
-    """Main entry point"""
+def main() -> None:
+    """Main entry point."""
     parser = argparse.ArgumentParser(
         description='Extract text and tables from PDF files using OpenAI API'
     )
@@ -429,4 +455,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

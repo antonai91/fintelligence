@@ -6,11 +6,10 @@ Test script for the refactored QA engine with metadata and two-stage search
 import sys
 from pathlib import Path
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the src directory to sys.path so we can import the package
+sys.path.append(str(Path(__file__).parents[1] / "src"))
 
-from scripts.qa_engine import ProcessedDocumentLoader, QAEngine
-import config
+from investor_relations_scraper import ProcessedDocumentLoader, QAEngine, config
 
 def test_metadata_extraction():
     """Test metadata extraction from filenames"""

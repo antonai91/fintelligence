@@ -2,11 +2,12 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 
-# Add the project root to the path so we can import from scripts
-sys.path.append(os.getcwd())
+# Add the src directory to sys.path so we can import the package
+sys.path.append(str(Path(__file__).parents[1] / "src"))
 
-from scripts.scraper import EquinorScraper
+from investor_relations_scraper import EquinorScraper
 
 async def run_scraper_examples():
     print("="*50)

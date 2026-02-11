@@ -7,10 +7,10 @@ import sys
 from pathlib import Path
 import tempfile
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the src directory to sys.path so we can import the package
+sys.path.append(str(Path(__file__).parents[1] / "src"))
 
-from scripts.qa_engine import ConversationMemory
+from investor_relations_scraper import ConversationMemory
 
 def test_conversation_memory():
     """Test the ConversationMemory class"""

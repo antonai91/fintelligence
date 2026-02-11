@@ -41,7 +41,9 @@ MODEL_QA = "gpt-4o"         # or "gpt-4o-mini"
 Download all available PDFs:
 
 ```bash
-uv run python scripts/scraper.py
+uv run python examples/basic_scraper.py
+# OR
+uv run ir-scraper
 ```
 
 ### Filter by Year
@@ -49,13 +51,13 @@ uv run python scripts/scraper.py
 Download only 2025 reports:
 
 ```bash
-uv run python scripts/scraper.py --year 2025
+uv run ir-scraper --year 2025
 ```
 
 Download only 2024 reports:
 
 ```bash
-uv run python scripts/scraper.py --year 2024
+uv run ir-scraper --year 2024
 ```
 
 ### Custom Download Directory
@@ -63,7 +65,7 @@ uv run python scripts/scraper.py --year 2024
 Specify a custom download directory:
 
 ```bash
-uv run python scripts/scraper.py --dir my_downloads
+uv run ir-scraper --dir my_downloads
 ```
 
 ### Show Browser Window
@@ -71,13 +73,13 @@ uv run python scripts/scraper.py --dir my_downloads
 Run with visible browser (useful for debugging):
 
 ```bash
-uv run python scripts/scraper.py --no-headless
+uv run ir-scraper --no-headless
 ```
 
 ### Combined Options
 
 ```bash
-uv run python scripts/scraper.py --year 2025 --dir reports_2025 --no-headless
+uv run ir-scraper --year 2025 --dir reports_2025 --no-headless
 ```
 
 ## Features
@@ -97,13 +99,17 @@ Downloaded PDFs are saved to the `downloads/` directory (or custom directory spe
 
 """
 investor_relations_scraper/
-├── scripts/
-│   ├── scraper.py      # Main scraper script
-│   ├── extractor.py    # (other scripts)
-│   └── qa_engine.py    # (other scripts)
-├── downloads/          # Downloaded PDFs (created automatically)
-├── pyproject.toml      # Project dependencies
-└── README.md          # This file
+├── src/
+│   └── investor_relations_scraper/
+│       ├── scraper.py    # Main scraper
+│       ├── cli.py        # PDF extractor CLI
+│       ├── qa_engine.py  # QA engine logic
+│       └── extractors/   # Extraction strategies
+├── examples/             # Example usage scripts
+├── tests/                # Test suite
+├── data/                 # Data directory
+├── pyproject.toml        # Project dependencies
+└── README.md             # This file
 """
 
 ## Requirements
@@ -123,21 +129,21 @@ The extractor uses `pdfplumber` to process downloaded PDFs and the OpenAI API to
 - Structured tables (CSV)
 - Metadata
 
-### Usage
+### Extractor Usage
 
 Process a single PDF:
 
 ```bash
-uv run python scripts/extractor.py --file "Q1-2025-report.pdf"
+uv run ir-extractor --file "Q1-2025-report.pdf"
 ```
 
 Process all PDFs in `data/raw`:
 
 ```bash
-uv run python scripts/extractor.py
+uv run ir-extractor
 ```
 
-### Output
+### Extractor Output
 
 The extractor creates:
 

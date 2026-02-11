@@ -12,6 +12,8 @@ from typing import List, Dict
 from playwright.async_api import async_playwright, Page, Download
 import re
 
+from . import config
+
 download_folder = "data/raw/"
 
 class EquinorScraper:

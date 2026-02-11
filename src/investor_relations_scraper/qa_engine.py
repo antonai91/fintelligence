@@ -12,9 +12,7 @@ import pickle
 import hashlib
 import faiss
 
-# Add parent directory to path to import config
-sys.path.insert(0, str(Path(__file__).parent.parent))
-import config
+from . import config
 
 class ProcessedDocumentLoader:
     """Loads processed text files and chunks them with rich metadata"""

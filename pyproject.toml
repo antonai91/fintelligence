@@ -20,3 +20,7 @@ dependencies = [
     "sentence-transformers>=2.3.0",
     "torch>=2.2.0",
 ]
+
+[project.scripts]
+ir-scraper = "investor_relations_scraper.scraper:main"
+ir-extractor = "investor_relations_scraper.cli:main"
