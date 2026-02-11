@@ -13,9 +13,10 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import asyncio
 import pandas as pd
 import pdfplumber
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from . import config
 
@@ -51,13 +52,14 @@ class PDFExtractor:
         # Initialize OpenAI client
         try:
             api_key = api_key or config.get_openai_api_key()
-            self.client = OpenAI(api_key=api_key)
+            self.client = AsyncOpenAI(api_key=api_key)
         except ValueError as e:
             print(f"❌ Error: {e}")
             raise
         
         # Create processed directory if it doesn't exist
         self.processed_dir.mkdir(parents=True, exist_ok=True)
+        self.semaphore = asyncio.Semaphore(5)  # Limit concurrent PDF processing
         
     def extract_text_from_pdf(self, pdf_path: Path) -> str:
         """
@@ -121,7 +123,7 @@ class PDFExtractor:
             print(f"✗ Unexpected error extracting tables from {pdf_path.name}: {e}")
             return []
     
-    def clean_text_with_openai(self, text: str, filename: str) -> str:
+    async def clean_text_with_openai(self, text: str, filename: str) -> str:
         """
         Clean and process text using OpenAI API.
         
@@ -144,7 +146,7 @@ class PDFExtractor:
         prompt = self._build_text_cleaning_prompt(filename, text)
 
         try:
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a financial document processing assistant."},
@@ -178,7 +180,7 @@ Return ONLY the cleaned text, without any explanations or metadata.
 Raw text:
 {text}"""
     
-    def process_table_with_openai(self, df: pd.DataFrame, page_num: int, table_num: int) -> Optional[pd.DataFrame]:
+    async def process_table_with_openai(self, df: pd.DataFrame, page_num: int, table_num: int) -> Optional[pd.DataFrame]:
         """
         Clean and format table using OpenAI API.
         
@@ -194,7 +196,7 @@ Raw text:
             table_str = df.to_string(index=False, na_rep='')
             prompt = self._build_table_cleaning_prompt(page_num, table_str)
 
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a financial data processing assistant."},
@@ -240,11 +242,12 @@ Return ONLY the CSV data (with headers), nothing else."""
         content = re.sub(r'\n```$', '', content)
         return content
     
-    def process_pdf(
+    async def process_pdf(
         self,
         pdf_path: Path,
         skip_text: bool = False,
-        skip_tables: bool = False
+        skip_tables: bool = False,
+        clean: bool = True
     ) -> Dict[str, Any]:
         """
         Process a single PDF file.
@@ -269,15 +272,15 @@ Return ONLY the CSV data (with headers), nothing else."""
         
         # Extract and process text
         if not skip_text:
-            self._process_text(pdf_path, base_name, results)
+            await self._process_text(pdf_path, base_name, results, clean)
         
         # Extract and process tables
         if not skip_tables:
-            self._process_tables(pdf_path, base_name, results)
+            await self._process_tables(pdf_path, base_name, results, clean)
         
         return results
     
-    def _process_text(self, pdf_path: Path, base_name: str, results: Dict[str, Any]) -> None:
+    async def _process_text(self, pdf_path: Path, base_name: str, results: Dict[str, Any], clean: bool = True) -> None:
         """Extract and process text from PDF."""
         print("  📝 Extracting text...")
         raw_text = self.extract_text_from_pdf(pdf_path)
@@ -286,21 +289,27 @@ Return ONLY the CSV data (with headers), nothing else."""
             results["errors"].append("No text extracted")
             return
             
-        print(f"  🤖 Cleaning text with OpenAI ({self.model})...")
-        cleaned_text = self.clean_text_with_openai(raw_text, pdf_path.name)
-        
-        if cleaned_text:
+        if clean:
+            print(f"  🤖 Cleaning text with OpenAI ({self.model})...")
+            final_text = await self.clean_text_with_openai(raw_text, pdf_path.name)
+        else:
+            print("  ⏩ Skipping text cleaning (saving raw text)")
+            final_text = raw_text
+
+        if final_text:
             text_file = self.processed_dir / f"{base_name}_text.txt"
-            text_file.write_text(cleaned_text, encoding='utf-8')
+            text_file.write_text(final_text, encoding='utf-8')
             results["text_file"] = text_file.name
             print(f"  ✓ Saved text: {text_file.name}")
         else:
-            results["errors"].append("Failed to clean text")
+            results["errors"].append("Failed to process text")
     
-    def _process_tables(self, pdf_path: Path, base_name: str, results: Dict[str, Any]) -> None:
+    async def _process_tables(self, pdf_path: Path, base_name: str, results: Dict[str, Any], clean: bool = True) -> None:
         """Extract and process tables from PDF."""
         print("  📊 Extracting tables...")
-        tables = self.extract_tables_from_pdf(pdf_path)
+        # Run synchronous pdfplumber extraction in executor
+        loop = asyncio.get_running_loop()
+        tables = await loop.run_in_executor(None, self.extract_tables_from_pdf, pdf_path)
         
         if not tables:
             print("  ℹ No tables found")
@@ -308,23 +317,38 @@ Return ONLY the CSV data (with headers), nothing else."""
             
         print(f"  Found {len(tables)} tables")
         
-        for idx, (page_num, df) in enumerate(tables, TABLE_INDEX_START):
-            print(f"  🤖 Processing table {idx}/{len(tables)} (page {page_num}) with OpenAI...")
-            
-            cleaned_df = self.process_table_with_openai(df, page_num, idx)
+        async def process_single_table(idx: int, page_num: int, df: pd.DataFrame):
+            if clean:
+                # print(f"  🤖 Processing table {idx}...", end="", flush=True)
+                cleaned_df = await self.process_table_with_openai(df, page_num, idx)
+            else:
+                cleaned_df = df
             
             if cleaned_df is not None and not cleaned_df.empty:
                 csv_file = self.processed_dir / f"{base_name}_table_{idx}.csv"
+                # file processing in main thread is fine for small files
                 cleaned_df.to_csv(csv_file, index=False)
                 results["table_files"].append(csv_file.name)
-                print(f"  ✓ Saved table: {csv_file.name}")
             else:
                 results["errors"].append(f"Failed to process table {idx}")
+
+        # Process tables concurrently
+        if clean:
+            print(f"  Processing {len(tables)} tables in parallel...")
+            tasks = [process_single_table(idx, page_num, df) for idx, (page_num, df) in enumerate(tables, TABLE_INDEX_START)]
+            await asyncio.gather(*tasks)
+        else:
+            print("  ⏩ Skipping table cleaning (saving raw CSVs)")
+            for idx, (page_num, df) in enumerate(tables, TABLE_INDEX_START):
+                await process_single_table(idx, page_num, df)
+                
+        print(f"  ✓ Saved {len(results['table_files'])} tables")
     
-    def process_all_pdfs(
+    async def process_all_pdfs(
         self,
         skip_text: bool = False,
         skip_tables: bool = False,
+        clean: bool = True,
         file_pattern: str = "*.pdf"
     ) -> List[Dict[str, Any]]:
         """
@@ -333,6 +357,7 @@ Return ONLY the CSV data (with headers), nothing else."""
         Args:
             skip_text: Skip text extraction
             skip_tables: Skip table extraction
+            clean: Whether to clean text/tables with OpenAI
             file_pattern: Glob pattern for PDF files (default: "*.pdf")
             
         Returns:
@@ -346,11 +371,13 @@ Return ONLY the CSV data (with headers), nothing else."""
         
         print(f"Found {len(pdf_files)} PDF files to process")
         
-        all_results = []
-        for idx, pdf_path in enumerate(pdf_files, TABLE_INDEX_START):
-            print(f"\n[{idx}/{len(pdf_files)}]")
-            results = self.process_pdf(pdf_path, skip_text, skip_tables)
-            all_results.append(results)
+        async def bounded_process_pdf(idx, pdf_path):
+            async with self.semaphore:
+                print(f"\n[{idx}/{len(pdf_files)}] Starting {pdf_path.name}")
+                return await self.process_pdf(pdf_path, skip_text, skip_tables, clean)
+
+        tasks = [bounded_process_pdf(idx, pdf_path) for idx, pdf_path in enumerate(pdf_files, TABLE_INDEX_START)]
+        all_results = await asyncio.gather(*tasks)
         
         return all_results
     
@@ -379,8 +406,8 @@ Return ONLY the CSV data (with headers), nothing else."""
                     print(f"  • {r['pdf']}: {', '.join(r['errors'])}")
 
 
-def main() -> None:
-    """Main entry point."""
+async def main_async() -> None:
+    """Main async entry point."""
     parser = argparse.ArgumentParser(
         description='Extract text and tables from PDF files using OpenAI API'
     )
@@ -412,17 +439,24 @@ def main() -> None:
         help='Skip table extraction'
     )
     parser.add_argument(
+        '--no-cleaning',
+        action='store_true',
+        help='Skip OpenAI cleaning (faster, raw output)'
+    )
+    parser.add_argument(
         '--api-key',
         help='OpenAI API key (or set OPENAI_API_KEY environment variable)'
     )
     
     args = parser.parse_args()
+    clean = not args.no_cleaning
     
     # Print configuration
     print("\n📋 Current Configuration:")
     print(f"   Model: {args.model or config.MODEL_EXTRACTOR}")
     print(f"   Raw Dir: {args.raw_dir or config.RAW_DIR}")
     print(f"   Processed Dir: {args.processed_dir or config.PROCESSED_DIR}")
+    print(f"   Cleaning Enabled: {clean}")
     print()
     
     # Initialize extractor (will validate API key)
@@ -444,15 +478,26 @@ def main() -> None:
             print(f"❌ Error: File not found: {pdf_path}")
             return
         
-        results = [extractor.process_pdf(pdf_path, args.skip_text, args.skip_tables)]
+        results = [await extractor.process_pdf(pdf_path, args.skip_text, args.skip_tables, clean)]
     else:
         # Process all files
-        results = extractor.process_all_pdfs(args.skip_text, args.skip_tables)
+        results = await extractor.process_all_pdfs(args.skip_text, args.skip_tables, clean)
     
     # Print summary
     extractor.print_summary(results)
     print("\n✓ Processing complete!")
 
+
+def main():
+    """Entry point wrapper."""
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        print("\n⚠ Processing interrupted by user")
+    except Exception as e:
+        print(f"\n❌ detailed error: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
