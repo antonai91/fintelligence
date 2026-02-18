@@ -110,6 +110,12 @@ BATCH_SIZE = 10
 # Batch size for generating embeddings
 EMBEDDING_BATCH_SIZE = 32
 
+# Maximum number of documents the agentic planner can select
+MAX_PLANNED_SOURCES = 10
+
+# Default number of chunks to retrieve per planned source
+CHUNKS_PER_SOURCE_DEFAULT = 3
+
 # ============================================================================
 # Extractor Configuration
 # ============================================================================

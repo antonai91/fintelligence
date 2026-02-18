@@ -7,6 +7,7 @@ from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from sklearn.metrics.pairwise import cosine_similarity
+import json
 import re
 import pickle
 import hashlib
@@ -84,7 +85,6 @@ JSON:"""
                 result = re.sub(r'^```(?:json)?\n?', '', result)
                 result = re.sub(r'\n?```$', '', result)
             
-            import json
             metadata = json.loads(result)
             
             # Ensure all expected fields exist
@@ -419,7 +419,7 @@ class HybridSearchEngine:
         
         return metadata_scores
     
-    def search(self, query: str, top_k: int = 5, alpha: float = 0.7, doc_boost: float = 0.3) -> List[Dict[str, Any]]:
+    def search(self, query: str, top_k: int = 5, alpha: float = 0.7, doc_boost: float = 0.3, source_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Perform two-stage hybrid search
         
@@ -431,6 +431,7 @@ class HybridSearchEngine:
             top_k: Number of results to return
             alpha: Weight for semantic search (0-1). 1.0 = pure semantic, 0.0 = pure keyword
             doc_boost: Boost multiplier for documents matching metadata (0-1)
+            source_filter: If set, only return chunks from this source filename
         """
         if not self.documents:
             return []
@@ -465,6 +466,10 @@ class HybridSearchEngine:
         # 3. Combine Scores with metadata boost
         hybrid_scores = []
         for i, doc in enumerate(self.documents):
+            # Apply source filter: skip chunks not from the requested source
+            if source_filter and doc.get("metadata", {}).get("source") != source_filter:
+                continue
+                
             sem_score = semantic_scores.get(i, 0.0)
             kw_score = bm25_scores[i] if i < len(bm25_scores) else 0.0
             meta_score = metadata_scores.get(i, 0.0)
@@ -657,9 +662,158 @@ class QAEngine:
         self.is_indexed = True
         print("✓ Indexing complete!")
         
+    def _get_document_catalog(self) -> Tuple[List[Dict[str, str]], str]:
+        """
+        Build a deduplicated catalog of available documents with metadata.
+        
+        Returns:
+            Tuple of (catalog list, formatted catalog string for LLM)
+        """
+        seen_sources = {}
+        for doc in self.search_engine.documents:
+            meta = doc.get("metadata", {})
+            source = meta.get("source", "unknown")
+            if source not in seen_sources:
+                seen_sources[source] = {
+                    "source": source,
+                    "title": meta.get("title", source),
+                    "quarter": meta.get("quarter"),
+                    "year": meta.get("year"),
+                    "doc_type": meta.get("doc_type", "unknown"),
+                    "company": meta.get("company")
+                }
+        
+        catalog = list(seen_sources.values())
+        
+        # Format for the LLM
+        lines = []
+        for i, entry in enumerate(catalog, 1):
+            q = entry['quarter'] or 'N/A'
+            y = entry['year'] or 'N/A'
+            lines.append(f"{i}. {entry['source']} — {entry['title']} | {q} {y} | Type: {entry['doc_type']}")
+        
+        catalog_str = "\n".join(lines)
+        return catalog, catalog_str
+    
+    def _plan_sources(self, question: str, catalog_str: str, conversation_context: str = "") -> Dict[str, Any]:
+        """
+        Use the LLM to reason about which sources are needed.
+        
+        Args:
+            question: The user's question
+            catalog_str: Formatted document catalog
+            conversation_context: Optional conversation history
+            
+        Returns:
+            Dict with 'reasoning' and 'sources' list
+        """
+        prompt = f"""You are a financial research planner. Given a user question and a catalog of available documents, 
+your job is to think step-by-step about which documents are needed to answer the question comprehensively.
+
+{conversation_context}Available documents:
+{catalog_str}
+
+User question: {question}
+
+Think step-by-step:
+1. What is the user really asking? (Identify the time period, topic, scope)
+2. Which documents cover the relevant time period(s)?
+3. Which document types (report, transcript, presentation) are most useful for this question?
+4. Are there any edge cases? (e.g., "2025" means ALL quarters of 2025, "last year" depends on context)
+
+Then return a JSON object with:
+- "reasoning": A brief explanation of your thinking (2-3 sentences)
+- "sources": A list of objects, each with "source" (exact filename from the catalog) and "chunks" (number of chunks to retrieve, 1-5)
+
+Rules:
+- Select ALL documents that are relevant, don't leave any out
+- For broad time-based questions (e.g., "what happened in 2025"), include ALL quarters
+- For comparison questions, include all documents being compared
+- Maximum {config.MAX_PLANNED_SOURCES} sources
+- Default to {config.CHUNKS_PER_SOURCE_DEFAULT} chunks per source unless you have a reason to adjust
+
+Return ONLY the JSON object, no markdown formatting:"""
+
+        try:
+            print("  🧠 Planning: deciding which sources to use...")
+            response = self.client.chat.completions.create(
+                model=config.MODEL_QA,
+                messages=[
+                    {"role": "system", "content": "You are a research planning assistant. Always respond with valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                max_tokens=500
+            )
+            
+            result = response.choices[0].message.content.strip()
+            
+            # Clean markdown if present
+            if result.startswith("```"):
+                result = re.sub(r'^```(?:json)?\n?', '', result)
+                result = re.sub(r'\n?```$', '', result)
+            
+            plan = json.loads(result)
+            
+            # Validate structure
+            if "sources" not in plan or not isinstance(plan["sources"], list):
+                raise ValueError("Invalid plan structure: missing 'sources' list")
+            
+            # Cap sources
+            plan["sources"] = plan["sources"][:config.MAX_PLANNED_SOURCES]
+            
+            reasoning = plan.get("reasoning", "No reasoning provided")
+            print(f"  💡 Reasoning: {reasoning}")
+            print(f"  📋 Selected {len(plan['sources'])} source(s): {[s['source'] for s in plan['sources']]}")
+            
+            return plan
+            
+        except Exception as e:
+            print(f"  ⚠ Planning failed ({e}), falling back to all sources")
+            # Fallback: return all sources with default chunks
+            return {
+                "reasoning": f"Planning failed ({e}), using all available sources",
+                "sources": [{"source": s, "chunks": config.CHUNKS_PER_SOURCE_DEFAULT} 
+                           for s in set(d.get("metadata", {}).get("source", "") 
+                                       for d in self.search_engine.documents)]
+            }
+    
+    def _retrieve_for_plan(self, question: str, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Retrieve chunks from the sources specified in the plan.
+        
+        Args:
+            question: The user's question  
+            plan: The source plan from _plan_sources
+            
+        Returns:
+            List of search results across all planned sources
+        """
+        all_results = []
+        
+        for source_plan in plan.get("sources", []):
+            source_name = source_plan.get("source", "")
+            chunks_to_get = source_plan.get("chunks", config.CHUNKS_PER_SOURCE_DEFAULT)
+            
+            # Search within this specific source
+            results = self.search_engine.search(
+                query=question,
+                top_k=chunks_to_get,
+                source_filter=source_name
+            )
+            
+            if results:
+                all_results.extend(results)
+            else:
+                print(f"  ⚠ No chunks found for source: {source_name}")
+        
+        # Sort all results by score
+        all_results.sort(key=lambda x: x["score"], reverse=True)
+        return all_results
+    
     def answer_question(self, question: str, use_memory: Optional[bool] = None) -> Dict[str, Any]:
         """
-        Answer a question using the indexed documents
+        Answer a question using the agentic Plan → Retrieve → Synthesize pipeline.
         
         Args:
             question: The user's question
@@ -670,58 +824,83 @@ class QAEngine:
         
         # Determine if we should use memory for this question
         use_mem = use_memory if use_memory is not None else self.enable_memory
-            
-        # Retrieval
-        print(f"Searching for context for: '{question}'...")
-        results = self.search_engine.search(question, top_k=5)
+        
+        # === Stage 1: PLAN ===
+        print(f"\n🔍 Processing question: '{question}'")
+        
+        catalog, catalog_str = self._get_document_catalog()
+        
+        if not catalog:
+            answer = "I couldn't find any documents in the index."
+            if use_mem and self.memory:
+                self.memory.add_message("user", question)
+                self.memory.add_message("assistant", answer)
+                self.memory.save()
+            return {"answer": answer, "sources": [], "plan": None}
+        
+        # Build conversation context for the planner
+        conversation_context = ""
+        if use_mem and self.memory and self.memory.messages:
+            conversation_context = self.memory.get_formatted_history() + "---\n\n"
+        
+        plan = self._plan_sources(question, catalog_str, conversation_context)
+        
+        # === Stage 2: RETRIEVE ===
+        print("  📚 Retrieving relevant chunks from selected sources...")
+        results = self._retrieve_for_plan(question, plan)
         
         if not results:
-            answer = "I couldn't find any relevant information in the documents."
+            answer = "I couldn't find any relevant information in the selected documents."
             if use_mem and self.memory:
                 self.memory.add_message("user", question)
                 self.memory.add_message("assistant", answer)
                 self.memory.save()
             return {
                 "answer": answer,
-                "sources": []
+                "sources": [],
+                "plan": plan
             }
-            
-        # Context Construction
+        
+        # === Stage 3: SYNTHESIZE ===
+        # Build context grouped by source
         context_text = ""
         sources = []
         
         for i, res in enumerate(results):
             doc = res["document"]
             source_name = doc["metadata"]["source"]
-            context_text += f"Source {i+1} ({source_name}):\n{doc['text']}\n\n"
+            quarter = doc["metadata"].get("quarter", "")
+            year = doc["metadata"].get("year", "")
+            context_text += f"Source {i+1} ({source_name} — {quarter} {year}):\n{doc['text']}\n\n"
             
             if source_name not in sources:
                 sources.append(source_name)
-                
-        # LLM Generation with conversation history
-        system_prompt = """You are a helpful financial analyst assistant. 
-Use the provided context to answer the user's question about Equinor. 
-If the answer is not in the context, say you don't know. 
+        
+        reasoning = plan.get("reasoning", "")
+        
+        system_prompt = """You are a helpful financial analyst assistant.
+Use the provided context to answer the user's question about Equinor.
+If the answer is not in the context, say you don't know.
 Cite the sources (Source 1, Source 2, etc.) when stating facts.
-Keep the answer concise and professional.
+Provide a comprehensive, well-structured answer. Use bullet points or sections for clarity when appropriate.
 If there is previous conversation history, use it to provide more contextual and relevant answers."""
 
-        # Build the user prompt with optional conversation history
         user_prompt = ""
         
-        # Add conversation history if memory is enabled
         if use_mem and self.memory and self.memory.messages:
             user_prompt += self.memory.get_formatted_history()
             user_prompt += "---\n\n"
         
-        user_prompt += f"""Context from documents:
+        user_prompt += f"""Research plan reasoning: {reasoning}
+
+Context from {len(sources)} document(s):
 {context_text}
 
-Current question: {question}
+Question: {question}
 
 Answer:"""
 
-        print("Generating answer with OpenAI...")
+        print(f"  🤖 Synthesizing answer from {len(sources)} source(s), {len(results)} chunks...")
         try:
             response = self.client.chat.completions.create(
                 model=config.MODEL_QA,
@@ -735,7 +914,6 @@ Answer:"""
             
             answer = response.choices[0].message.content
             
-            # Add to conversation memory
             if use_mem and self.memory:
                 self.memory.add_message("user", question)
                 self.memory.add_message("assistant", answer)
@@ -744,6 +922,7 @@ Answer:"""
             return {
                 "answer": answer,
                 "sources": sources,
+                "plan": plan,
                 "retrieved_chunks": results
             }
             
@@ -755,7 +934,8 @@ Answer:"""
                 self.memory.save()
             return {
                 "answer": error_msg,
-                "sources": sources
+                "sources": sources,
+                "plan": plan
             }
     
     def clear_conversation(self):

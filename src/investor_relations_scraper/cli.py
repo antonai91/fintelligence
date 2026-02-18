@@ -137,12 +137,43 @@ class PDFExtractor:
         if not text.strip():
             return ""
         
-        # Truncate if text is too long (to avoid token limits)
+    async def clean_text_with_openai(self, text: str, filename: str) -> str:
+        """
+        Clean and process text using OpenAI API.
+        
+        Args:
+            text: Raw extracted text
+            filename: Name of the source file (for context)
+            
+        Returns:
+            Cleaned text ready for embedding, or original text if cleaning fails
+        """
+        if not text.strip():
+            return ""
+        
+        # Check if text needs chunking
         max_chars = config.MAX_TEXT_CHARS
         if len(text) > max_chars:
-            print(f"  ⚠ Text is very long ({len(text)} chars), truncating to {max_chars} chars")
-            text = text[:max_chars]
-        
+            print(f"  ℹ Text is long ({len(text)} chars), chunking into segments of ~{max_chars} chars")
+            chunks = self._chunk_text(text, max_chars)
+            print(f"  ℹ Split into {len(chunks)} chunks for processing")
+            
+            # Process chunks in parallel
+            async def process_chunk(chunk_idx, chunk_text):
+                # Add context about chunk position
+                chunk_prompt_suffix = f" (Part {chunk_idx+1}/{len(chunks)})"
+                return await self._clean_single_chunk(chunk_text, filename + chunk_prompt_suffix)
+
+            tasks = [process_chunk(i, chunk) for i, chunk in enumerate(chunks)]
+            cleaned_chunks = await asyncio.gather(*tasks)
+            
+            # Join chunks with double newline
+            return "\n\n".join(cleaned_chunks)
+        else:
+            return await self._clean_single_chunk(text, filename)
+
+    async def _clean_single_chunk(self, text: str, filename: str) -> str:
+        """Process a single chunk of text with OpenAI."""
         prompt = self._build_text_cleaning_prompt(filename, text)
 
         try:
@@ -159,9 +190,69 @@ class PDFExtractor:
             return cleaned_text
             
         except Exception as e:
-            print(f"  ✗ Error cleaning text with OpenAI: {e}")
-            print("  ⚠ Falling back to raw text")
+            print(f"  ✗ Error cleaning text chunk with OpenAI: {e}")
+            print("  ⚠ Falling back to raw text for this chunk")
             return text
+
+    def _chunk_text(self, text: str, max_chars: int) -> List[str]:
+        """
+        Split text into chunks that respect paragraph boundaries.
+        
+        Args:
+            text: Text to split
+            max_chars: Maximum characters per chunk
+            
+        Returns:
+            List of text chunks
+        """
+        if len(text) <= max_chars:
+            return [text]
+            
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        
+        # Split by double newlines (paragraphs) first
+        paragraphs = text.split('\n\n')
+        
+        for paragraph in paragraphs:
+            # If a single paragraph is too long, split by single newlines
+            if len(paragraph) > max_chars:
+                lines = paragraph.split('\n')
+                for line in lines:
+                    if current_length + len(line) + 1 > max_chars:
+                        if current_chunk:
+                            chunks.append('\n\n'.join(current_chunk))
+                            current_chunk = []
+                            current_length = 0
+                    
+                    # If a single line is still too long, we have to hard split it
+                    if len(line) > max_chars:
+                        # Process what we have so far
+                        if current_chunk:
+                            chunks.append('\n\n'.join(current_chunk))
+                            current_chunk = []
+                            current_length = 0
+                        
+                        # Hard split the long line
+                        for i in range(0, len(line), max_chars):
+                            chunks.append(line[i:i + max_chars])
+                    else:
+                        current_chunk.append(line)
+                        current_length += len(line) + 1
+            else:
+                if current_length + len(paragraph) + 2 > max_chars:
+                    chunks.append('\n\n'.join(current_chunk))
+                    current_chunk = []
+                    current_length = 0
+                
+                current_chunk.append(paragraph)
+                current_length += len(paragraph) + 2
+        
+        if current_chunk:
+            chunks.append('\n\n'.join(current_chunk))
+            
+        return chunks
     
     def _build_text_cleaning_prompt(self, filename: str, text: str) -> str:
         """Build the prompt for text cleaning."""
