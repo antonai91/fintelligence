@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union
 import numpy as np
+import pandas as pd
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
@@ -142,9 +143,106 @@ JSON:"""
         
         return metadata
         
+    def _generate_table_summary(self, csv_content: str, filename: str) -> str:
+        """
+        Generate a short LLM summary describing what a CSV table contains.
+        
+        Args:
+            csv_content: The CSV content as a string
+            filename: Name of the CSV file
+            
+        Returns:
+            A 1-2 sentence summary of the table's contents
+        """
+        # Extract base info from filename
+        base_name = re.sub(r'_table_\d+\.csv$', '', filename)
+        
+        prompt = f"""Analyze this financial table and describe what data it contains in 1-2 sentences.
+Focus on: what metrics/figures are shown, what time period, and what category of data (e.g., revenue, expenses, dividends, production).
+
+Filename: {filename}
+Table content:
+{csv_content[:2000]}
+
+Description:"""
+
+        try:
+            response = self.openai_client.chat.completions.create(
+                model=config.MODEL_METADATA,
+                messages=[
+                    {"role": "system", "content": "You are a financial data analyst. Describe table contents concisely."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                max_tokens=100
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"  ⚠ Table summary generation failed for {filename}: {e}")
+            # Fallback: use column headers
+            first_line = csv_content.split('\n')[0] if csv_content else filename
+            return f"Financial table from {base_name}: columns {first_line}"
+    
+    def _process_csv_file(self, file_path: Path) -> List[Dict[str, Any]]:
+        """
+        Process a single CSV table file into a document chunk with metadata.
+        
+        Args:
+            file_path: Path to the CSV file
+            
+        Returns:
+            List with a single document chunk, or empty list if table is too small
+        """
+        try:
+            df = pd.read_csv(file_path)
+        except Exception as e:
+            print(f"  ⚠ Error reading CSV {file_path.name}: {e}")
+            return []
+        
+        # Skip tables that are too small
+        if df.shape[0] < config.MIN_TABLE_ROWS_FOR_INDEX:
+            return []
+        
+        # Skip tables with no meaningful data (all NaN)
+        if df.dropna(how='all').empty:
+            return []
+        
+        # Convert to Markdown table for embedding
+        markdown_table = df.to_markdown(index=False)
+        
+        # Generate LLM summary
+        csv_content = file_path.read_text(encoding='utf-8')
+        print(f"  Generating table summary...")
+        table_summary = self._generate_table_summary(csv_content, file_path.name)
+        print(f"  -> {table_summary}")
+        
+        # Extract metadata from filename (e.g., Q1-2025-report_table_5.csv)
+        file_metadata = self._extract_metadata_from_filename(file_path.name)
+        
+        # Derive the original PDF source name
+        source_name = re.sub(r'_table_\d+\.csv$', '.pdf', file_path.name)
+        
+        # Create a single chunk: summary + table content
+        chunk_text = f"Table Summary: {table_summary}\n\n{markdown_table}"
+        
+        return [{
+            "text": chunk_text,
+            "metadata": {
+                "source": source_name,
+                "title": table_summary,
+                "doc_type": "table",
+                "quarter": file_metadata.get("quarter"),
+                "year": file_metadata.get("year"),
+                "company": file_metadata.get("company"),
+                "table_summary": table_summary,
+                "path": str(file_path),
+                "chunk_id": 0
+            }
+        }]
+    
     def extract_text_from_directory(self, directory: str) -> List[Dict[str, Any]]:
         """
-        Load processed text files from directory
+        Load processed text files and CSV tables from directory
         
         Returns:
             List of documents (chunks) with rich metadata
@@ -152,10 +250,9 @@ JSON:"""
         documents = []
         path = Path(directory)
         
-        # Look for processed text files
+        # === Load text files ===
         text_files = list(path.glob('**/*_text.txt'))
         if not text_files:
-            # Fallback to any .txt files
             text_files = list(path.glob('**/*.txt'))
         
         print(f"Found {len(text_files)} processed text files in {directory}")
@@ -164,6 +261,18 @@ JSON:"""
             try:
                 print(f"Loading {file_path.name}...")
                 chunks = self._process_file(file_path)
+                documents.extend(chunks)
+            except Exception as e:
+                print(f"Error loading {file_path.name}: {e}")
+        
+        # === Load CSV table files ===
+        csv_files = list(path.glob('**/*_table_*.csv'))
+        print(f"Found {len(csv_files)} CSV table files in {directory}")
+        
+        for file_path in csv_files:
+            try:
+                print(f"Loading table {file_path.name}...")
+                chunks = self._process_csv_file(file_path)
                 documents.extend(chunks)
             except Exception as e:
                 print(f"Error loading {file_path.name}: {e}")
@@ -670,16 +779,28 @@ class QAEngine:
             Tuple of (catalog list, formatted catalog string for LLM)
         """
         seen_sources = {}
+        table_summaries = {}  # Collect table summaries per source
+        
         for doc in self.search_engine.documents:
             meta = doc.get("metadata", {})
             source = meta.get("source", "unknown")
+            doc_type = meta.get("doc_type", "unknown")
+            
+            if doc_type == "table":
+                # Collect table summaries grouped by source PDF
+                if source not in table_summaries:
+                    table_summaries[source] = []
+                summary = meta.get("table_summary", meta.get("title", "table"))
+                if summary not in table_summaries[source]:
+                    table_summaries[source].append(summary)
+            
             if source not in seen_sources:
                 seen_sources[source] = {
                     "source": source,
                     "title": meta.get("title", source),
                     "quarter": meta.get("quarter"),
                     "year": meta.get("year"),
-                    "doc_type": meta.get("doc_type", "unknown"),
+                    "doc_type": doc_type,
                     "company": meta.get("company")
                 }
         
@@ -690,7 +811,15 @@ class QAEngine:
         for i, entry in enumerate(catalog, 1):
             q = entry['quarter'] or 'N/A'
             y = entry['year'] or 'N/A'
-            lines.append(f"{i}. {entry['source']} — {entry['title']} | {q} {y} | Type: {entry['doc_type']}")
+            line = f"{i}. {entry['source']} — {entry['title']} | {q} {y} | Type: {entry['doc_type']}"
+            
+            # Add table summaries if this source has associated tables
+            source = entry['source']
+            if source in table_summaries:
+                tables_desc = "; ".join(table_summaries[source][:5])  # Show up to 5
+                line += f"\n   📊 Tables: {tables_desc}"
+            
+            lines.append(line)
         
         catalog_str = "\n".join(lines)
         return catalog, catalog_str
@@ -718,8 +847,9 @@ User question: {question}
 Think step-by-step:
 1. What is the user really asking? (Identify the time period, topic, scope)
 2. Which documents cover the relevant time period(s)?
-3. Which document types (report, transcript, presentation) are most useful for this question?
-4. Are there any edge cases? (e.g., "2025" means ALL quarters of 2025, "last year" depends on context)
+3. Which document types (report, transcript, presentation, table) are most useful for this question?
+4. For questions about specific numbers, figures, or financial metrics, prefer sources that have associated tables (marked with 📊)
+5. Are there any edge cases? (e.g., "2025" means ALL quarters of 2025, "last year" depends on context)
 
 Then return a JSON object with:
 - "reasoning": A brief explanation of your thinking (2-3 sentences)
@@ -729,6 +859,7 @@ Rules:
 - Select ALL documents that are relevant, don't leave any out
 - For broad time-based questions (e.g., "what happened in 2025"), include ALL quarters
 - For comparison questions, include all documents being compared
+- For quantitative questions (revenue, costs, dividends, production), prioritize sources with tables
 - Maximum {config.MAX_PLANNED_SOURCES} sources
 - Default to {config.CHUNKS_PER_SOURCE_DEFAULT} chunks per source unless you have a reason to adjust
 

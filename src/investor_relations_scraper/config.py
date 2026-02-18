@@ -116,6 +116,9 @@ MAX_PLANNED_SOURCES = 10
 # Default number of chunks to retrieve per planned source
 CHUNKS_PER_SOURCE_DEFAULT = 3
 
+# Minimum number of data rows for a CSV table to be indexed
+MIN_TABLE_ROWS_FOR_INDEX = 2
+
 # ============================================================================
 # Extractor Configuration
 # ============================================================================
