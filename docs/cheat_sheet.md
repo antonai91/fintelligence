@@ -14,21 +14,40 @@ cp .env.example .env
 
 ```bash
 # Download all
-uv run python scripts/scraper.py
+uv run ir-scraper
 
 # Download specific year
-uv run python scripts/scraper.py --year 2025
+uv run ir-scraper --year 2025
 ```
 
 ### Extractor (Process PDFs)
 
 ```bash
 # Process all downloaded PDFs
-uv run python scripts/extractor.py
+uv run ir-extractor
 
 # Process a single specific file
-uv run python scripts/extractor.py --file "Q1-2025-report.pdf"
+uv run ir-extractor --file "Q1-2025-report.pdf"
+
+# Skip cleaning (faster, raw output only)
+uv run ir-extractor --no-cleaning
 ```
+
+### QA Chat
+
+```bash
+uv run python examples/chat_qa.py
+```
+
+## Extraction Methods
+
+Set `PDF_EXTRACTION_METHOD` in `config.py`:
+
+| Value | Description |
+|-------|-------------|
+| `"pdfplumber"` | Fast, text-based (digital PDFs only) |
+| `"qwen-vl"` | Full OCR via Qwen2.5-VL |
+| `"fallback"` (default) | pdfplumber + OCR fallback per-page |
 
 ## Common Options
 
@@ -39,6 +58,7 @@ uv run python scripts/extractor.py --file "Q1-2025-report.pdf"
 | `--file FILENAME` | Process specific file |
 | `--skip-text` | Skip text extraction |
 | `--skip-tables` | Skip table extraction |
+| `--no-cleaning` | Skip OpenAI text cleaning |
 | `--raw-dir DIR` | Custom input directory |
 | `--processed-dir DIR` | Custom output directory |
 
@@ -65,6 +85,7 @@ Ensure the filename passed to `--file` exists in `data/raw/`.
 ## Performance Tips
 
 - **Text Only**: Use `--skip-tables` for much faster processing if you only need text search.
+- **No Cleaning**: Use `--no-cleaning` to skip OpenAI processing for raw extraction.
 - **Process Single File**: Always test with one file first before running the full batch.
 
 ## Documentation

@@ -87,9 +87,11 @@ uv run ir-scraper --year 2025 --dir reports_2025 --no-headless
 - **Automated PDF Downloads**: Automatically finds and downloads all financial report PDFs
 - **Year Filtering**: Filter reports by specific year
 - **Multiple Extraction Methods**: Uses multiple strategies to find PDFs on the page
+- **Fallback OCR**: Automatically uses Qwen2.5-VL OCR for scanned/image-based PDF pages
 - **Error Handling**: Robust error handling with fallback download methods
 - **Progress Tracking**: Shows download progress and status
 - **Headless Mode**: Can run invisibly in the background or with visible browser
+- **Agentic QA**: Plan → Retrieve → Synthesize pipeline for answering financial questions
 
 ## Output
 
@@ -97,20 +99,28 @@ Downloaded PDFs are saved to the `downloads/` directory (or custom directory spe
 
 ## Project Structure
 
-"""
+```text
 investor_relations_scraper/
 ├── src/
 │   └── investor_relations_scraper/
-│       ├── scraper.py    # Main scraper
-│       ├── cli.py        # PDF extractor CLI
-│       ├── qa_engine.py  # QA engine logic
-│       └── extractors/   # Extraction strategies
-├── examples/             # Example usage scripts
-├── tests/                # Test suite
-├── data/                 # Data directory
-├── pyproject.toml        # Project dependencies
-└── README.md             # This file
-"""
+│       ├── config.py              # Central configuration
+│       ├── scraper.py             # Playwright scraper
+│       ├── cli.py                 # PDF extractor CLI
+│       ├── document_loader.py     # Document loading & chunking
+│       ├── search.py              # FAISS vector store & hybrid search
+│       ├── conversation_memory.py # Chat history management
+│       ├── qa_engine.py           # QA orchestrator (Plan → Retrieve → Synthesize)
+│       └── extractors/            # PDF extraction strategies
+│           ├── base.py            # Abstract base classes
+│           ├── metadata_extractors.py
+│           └── pdf_extractors.py  # PdfPlumber, Qwen2.5-VL, Fallback
+├── examples/                      # Example usage scripts
+├── tests/                         # Test suite
+├── data/                          # Data directory
+├── docs/                          # Documentation
+├── pyproject.toml                 # Project dependencies
+└── README.md                      # This file
+```
 
 ## Requirements
 
@@ -123,11 +133,13 @@ All dependencies are managed via the `pyproject.toml` file.
 
 ## PDF Extractor
 
-The extractor uses `pdfplumber` to process downloaded PDFs and the OpenAI API to clean and structure the data, extracting:
+The extractor processes downloaded PDFs and uses OpenAI to clean and structure the data. Three extraction methods are available (set in `config.py`):
 
-- Clean text content
-- Structured tables (CSV)
-- Metadata
+| Method | `PDF_EXTRACTION_METHOD` | Description |
+|--------|------------------------|-------------|
+| **pdfplumber** | `"pdfplumber"` | Fast, text-based extraction |
+| **Qwen2.5-VL** | `"qwen-vl"` | Full OCR via vision-language model |
+| **Fallback** (default) | `"fallback"` | pdfplumber first, OCR per-page when needed |
 
 ### Extractor Usage
 
