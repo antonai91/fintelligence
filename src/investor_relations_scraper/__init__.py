@@ -19,7 +19,10 @@ from .extractors import (
     FallbackPDFExtractor,
 )
 from .scraper import EquinorScraper
-from .qa_engine import QAEngine, ProcessedDocumentLoader, PersistentVectorStore, HybridSearchEngine, ConversationMemory
+from .qa_engine import QAEngine
+from .document_loader import ProcessedDocumentLoader
+from .search import PersistentVectorStore, HybridSearchEngine
+from .conversation_memory import ConversationMemory
 from .cli import PDFExtractor
 
 __all__ = [
