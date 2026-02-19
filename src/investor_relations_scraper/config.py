@@ -53,8 +53,8 @@ MODEL_DEVICE = None
 # ============================================================================
 
 # PDF extraction method
-# Options: "pdfplumber" (fast, good for text-based PDFs) or "qwen-vl" (OCR, better for scanned PDFs)
-PDF_EXTRACTION_METHOD = "pdfplumber"
+# Options: "pdfplumber" (fast, text-based), "qwen-vl" (OCR, scanned PDFs), "fallback" (pdfplumber + OCR per-page)
+PDF_EXTRACTION_METHOD = "fallback"
 
 # Metadata extraction method
 # Options: "llm" (intelligent, uses OpenAI), "regex" (fast, filename-based), "hybrid" (tries LLM, falls back to regex)

@@ -19,6 +19,7 @@ import pdfplumber
 from openai import AsyncOpenAI
 
 from . import config
+from .extractors import PdfPlumberExtractor, Qwen25VLExtractor, FallbackPDFExtractor
 
 # Constants
 MIN_TABLE_ROWS = 2
@@ -57,13 +58,36 @@ class PDFExtractor:
             print(f"❌ Error: {e}")
             raise
         
+        # Select PDF extraction strategy based on config
+        method = config.PDF_EXTRACTION_METHOD
+        if method == "qwen-vl":
+            self.extractor = Qwen25VLExtractor(
+                model_path=config.QWEN_VL_MODEL_PATH,
+                model_file=config.QWEN_VL_MODEL_FILE,
+                n_gpu_layers=config.QWEN_VL_N_GPU_LAYERS,
+                n_ctx=config.QWEN_VL_N_CTX,
+                verbose=config.QWEN_VL_VERBOSE,
+            )
+        elif method == "fallback":
+            self.extractor = FallbackPDFExtractor(
+                model_path=config.QWEN_VL_MODEL_PATH,
+                model_file=config.QWEN_VL_MODEL_FILE,
+                n_gpu_layers=config.QWEN_VL_N_GPU_LAYERS,
+                n_ctx=config.QWEN_VL_N_CTX,
+                verbose=config.QWEN_VL_VERBOSE,
+            )
+        else:  # "pdfplumber" or any unknown value
+            self.extractor = PdfPlumberExtractor()
+        
+        print(f"   Extraction Strategy: {self.extractor.get_name()}")
+        
         # Create processed directory if it doesn't exist
         self.processed_dir.mkdir(parents=True, exist_ok=True)
         self.semaphore = asyncio.Semaphore(5)  # Limit concurrent PDF processing
         
     def extract_text_from_pdf(self, pdf_path: Path) -> str:
         """
-        Extract raw text from PDF file.
+        Extract raw text from PDF file using the configured extraction strategy.
         
         Args:
             pdf_path: Path to PDF file
@@ -71,26 +95,11 @@ class PDFExtractor:
         Returns:
             Extracted text as string, or empty string if extraction fails
         """
-        text_content = []
-        
-        try:
-            with pdfplumber.open(pdf_path) as pdf:
-                for page_num, page in enumerate(pdf.pages, PAGE_NUMBER_START):
-                    text = page.extract_text()
-                    if text:
-                        text_content.append(f"--- Page {page_num} ---\n{text}")
-                        
-            return "\n\n".join(text_content)
-        except (IOError, OSError) as e:
-            print(f"✗ Error reading PDF file {pdf_path.name}: {e}")
-            return ""
-        except Exception as e:
-            print(f"✗ Unexpected error extracting text from {pdf_path.name}: {e}")
-            return ""
+        return self.extractor.extract_text(pdf_path)
     
     def extract_tables_from_pdf(self, pdf_path: Path) -> List[Tuple[int, pd.DataFrame]]:
         """
-        Extract tables from PDF file.
+        Extract tables from PDF file using the configured extraction strategy.
         
         Args:
             pdf_path: Path to PDF file
@@ -98,30 +107,7 @@ class PDFExtractor:
         Returns:
             List of tuples (page_number, DataFrame), or empty list if extraction fails
         """
-        tables = []
-        
-        try:
-            with pdfplumber.open(pdf_path) as pdf:
-                for page_num, page in enumerate(pdf.pages, PAGE_NUMBER_START):
-                    page_tables = page.extract_tables()
-                    
-                    for table_data in page_tables:
-                        if not table_data:
-                            continue
-                            
-                        df = pd.DataFrame(table_data)
-                        
-                        # Skip empty or single-row tables
-                        if not df.empty and df.shape[0] >= MIN_TABLE_ROWS:
-                            tables.append((page_num, df))
-                                
-            return tables
-        except (IOError, OSError) as e:
-            print(f"✗ Error reading PDF file {pdf_path.name}: {e}")
-            return []
-        except Exception as e:
-            print(f"✗ Unexpected error extracting tables from {pdf_path.name}: {e}")
-            return []
+        return self.extractor.extract_tables(pdf_path)
     
     async def clean_text_with_openai(self, text: str, filename: str) -> str:
         """

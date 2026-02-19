@@ -275,3 +275,136 @@ class Qwen25VLExtractor(BasePDFExtractor):
     def get_name(self) -> str:
         """Get the name of this extractor."""
         return "Qwen2.5-VL-3B-Instruct-GGUF"
+
+
+class FallbackPDFExtractor(BasePDFExtractor):
+    """
+    Fallback PDF extractor: uses pdfplumber first, falls back to Qwen2.5-VL OCR per-page.
+    
+    This extractor iterates page-by-page. For each page, pdfplumber is tried first.
+    If pdfplumber returns no text (e.g. scanned/image-based page), that single page
+    is sent through the Qwen2.5-VL vision-language model for OCR.
+    
+    The Qwen model is only loaded if a fallback is actually needed, keeping the
+    fast path for fully digital PDFs.
+    """
+    
+    def __init__(
+        self,
+        model_path: str = "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF",
+        model_file: str = "qwen2_5-vl-3b-instruct-q4_k_m.gguf",
+        n_gpu_layers: int = -1,
+        n_ctx: int = 4096,
+        verbose: bool = False
+    ):
+        """
+        Initialize the fallback extractor.
+        
+        Args:
+            model_path: HuggingFace model ID or local path for Qwen2.5-VL
+            model_file: Specific GGUF file to use
+            n_gpu_layers: Number of layers to offload to GPU (-1 for all)
+            n_ctx: Context window size
+            verbose: Whether to print verbose llama.cpp output
+        """
+        self._pdfplumber = PdfPlumberExtractor()
+        self._qwen: Optional[Qwen25VLExtractor] = None
+        
+        # Store Qwen config for lazy initialization
+        self._qwen_config = {
+            "model_path": model_path,
+            "model_file": model_file,
+            "n_gpu_layers": n_gpu_layers,
+            "n_ctx": n_ctx,
+            "verbose": verbose,
+        }
+    
+    def _get_qwen(self) -> Qwen25VLExtractor:
+        """Lazily initialize the Qwen extractor only when needed."""
+        if self._qwen is None:
+            print("  🔄 Initializing Qwen2.5-VL OCR for fallback...")
+            self._qwen = Qwen25VLExtractor(**self._qwen_config)
+        return self._qwen
+    
+    def extract_text(self, pdf_path: Path) -> str:
+        """
+        Extract text page-by-page, falling back to Qwen OCR for pages with no text.
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            Extracted text as string
+        """
+        text_content = []
+        fallback_count = 0
+        
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                total_pages = len(pdf.pages)
+                
+                for page_num, page in enumerate(pdf.pages, 1):
+                    text = page.extract_text()
+                    
+                    if text and text.strip():
+                        # pdfplumber succeeded
+                        text_content.append(f"--- Page {page_num} ---\n{text}")
+                    else:
+                        # pdfplumber returned no text — fall back to Qwen OCR
+                        print(f"  ⚠ Page {page_num}/{total_pages}: pdfplumber returned no text, falling back to Qwen OCR...")
+                        fallback_count += 1
+                        
+                        try:
+                            qwen = self._get_qwen()
+                            # Convert just this page to an image
+                            from pdf2image import convert_from_path
+                            images = convert_from_path(
+                                pdf_path,
+                                first_page=page_num,
+                                last_page=page_num
+                            )
+                            
+                            if images:
+                                qwen._initialize_model()
+                                ocr_text = qwen._extract_text_from_image(images[0], page_num)
+                                if ocr_text and ocr_text.strip():
+                                    text_content.append(f"--- Page {page_num} (OCR) ---\n{ocr_text}")
+                                    print(f"  ✓ Page {page_num}: OCR extracted {len(ocr_text)} characters")
+                                else:
+                                    print(f"  ✗ Page {page_num}: OCR also returned no text")
+                            else:
+                                print(f"  ✗ Page {page_num}: Failed to convert page to image")
+                                
+                        except ImportError as e:
+                            print(f"  ✗ Page {page_num}: OCR fallback unavailable — {e}")
+                        except Exception as e:
+                            print(f"  ✗ Page {page_num}: OCR fallback failed — {e}")
+            
+            if fallback_count > 0:
+                print(f"  📊 Extraction summary: {total_pages} pages total, {fallback_count} used OCR fallback")
+            
+            return "\n\n".join(text_content)
+            
+        except Exception as e:
+            print(f"✗ Error extracting text from {pdf_path.name}: {e}")
+            return ""
+    
+    def extract_tables(self, pdf_path: Path) -> List[Tuple[int, pd.DataFrame]]:
+        """
+        Extract tables using pdfplumber (Qwen table extraction is not implemented).
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            List of tuples (page_number, DataFrame)
+        """
+        return self._pdfplumber.extract_tables(pdf_path)
+    
+    def supports_ocr(self) -> bool:
+        """This extractor supports OCR via Qwen fallback."""
+        return True
+    
+    def get_name(self) -> str:
+        """Get the name of this extractor."""
+        return "Fallback (pdfplumber + Qwen2.5-VL OCR)"

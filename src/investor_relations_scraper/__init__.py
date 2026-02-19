@@ -16,6 +16,7 @@ from .extractors import (
     HybridMetadataExtractor,
     PdfPlumberExtractor,
     Qwen25VLExtractor,
+    FallbackPDFExtractor,
 )
 from .scraper import EquinorScraper
 from .qa_engine import QAEngine, ProcessedDocumentLoader, PersistentVectorStore, HybridSearchEngine, ConversationMemory
@@ -29,6 +30,7 @@ __all__ = [
     "HybridMetadataExtractor",
     "PdfPlumberExtractor",
     "Qwen25VLExtractor",
+    "FallbackPDFExtractor",
     "EquinorScraper",
     "QAEngine",
     "ProcessedDocumentLoader",

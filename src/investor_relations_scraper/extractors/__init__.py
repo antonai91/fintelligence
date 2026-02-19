@@ -11,7 +11,7 @@ from .metadata_extractors import (
     RegexMetadataExtractor,
     HybridMetadataExtractor,
 )
-from .pdf_extractors import PdfPlumberExtractor, Qwen25VLExtractor
+from .pdf_extractors import PdfPlumberExtractor, Qwen25VLExtractor, FallbackPDFExtractor
 
 __all__ = [
     "BaseMetadataExtractor",
@@ -21,4 +21,5 @@ __all__ = [
     "HybridMetadataExtractor",
     "PdfPlumberExtractor",
     "Qwen25VLExtractor",
+    "FallbackPDFExtractor",
 ]
