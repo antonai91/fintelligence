@@ -156,7 +156,7 @@ JSON:"""
             A 1-2 sentence summary of the table's contents
         """
         # Extract base info from filename
-        base_name = re.sub(r'_table_\d+\.csv$', '', filename)
+        base_name = re.sub(r'_table_(?:p\d+_)?\d+\.csv$', '', filename)
         
         prompt = f"""Analyze this financial table and describe what data it contains in 1-2 sentences.
 Focus on: what metrics/figures are shown, what time period, and what category of data (e.g., revenue, expenses, dividends, production).
@@ -221,7 +221,7 @@ Description:"""
         file_metadata = self._extract_metadata_from_filename(file_path.name)
         
         # Derive the original PDF source name
-        source_name = re.sub(r'_table_\d+\.csv$', '.pdf', file_path.name)
+        source_name = re.sub(r'_table_(?:p\d+_)?\d+\.csv$', '.pdf', file_path.name)
         
         # Create a single chunk: summary + table content
         chunk_text = f"Table Summary: {table_summary}\n\n{markdown_table}"

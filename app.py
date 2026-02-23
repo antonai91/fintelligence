@@ -77,36 +77,43 @@ def get_pdf_list() -> List[str]:
 def _map_tables_to_pages(
     pdf_path: Path, base_name: str
 ) -> Dict[int, List[pd.DataFrame]]:
+    """Map tables to pages using the page number embedded in CSV filenames.
+    
+    Expects filenames like: {base_name}_table_p{page}_{idx}.csv
+    Falls back to old format {base_name}_table_{idx}.csv (no page mapping).
+    """
+    import re
     mapping: Dict[int, List[pd.DataFrame]] = {}
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            table_idx = 1
-            for pg_num, page in enumerate(pdf.pages, 1):
-                page_tables = page.extract_tables()
-                if page_tables:
-                    for _ in page_tables:
-                        csv_path = PROCESSED_DIR / f"{base_name}_table_{table_idx}.csv"
-                        if csv_path.exists():
-                            try:
-                                df = pd.read_csv(csv_path)
-                                mapping.setdefault(pg_num, []).append(df)
-                            except Exception:
-                                pass
-                        table_idx += 1
-    except Exception as e:
-        print(f"⚠ Table-page mapping failed: {e}")
+    
+    # Pattern: base_table_p{page}_{idx}.csv  (new format with page number)
+    new_pattern = re.compile(
+        re.escape(base_name) + r"_table_p(\d+)_\d+\.csv"
+    )
+    # Pattern: base_table_{idx}.csv  (old format without page number)
+    old_pattern = re.compile(
+        re.escape(base_name) + r"_table_\d+\.csv"
+    )
+    
+    for csv_path in sorted(PROCESSED_DIR.glob(f"{base_name}_table_*.csv")):
+        m = new_pattern.match(csv_path.name)
+        if m:
+            page_num = int(m.group(1))
+        elif old_pattern.match(csv_path.name):
+            # Old format — assign to page 0 (will show on all pages or none)
+            page_num = 0
+        else:
+            continue
+        
+        try:
+            df = pd.read_csv(csv_path)
+            if not df.empty:
+                mapping.setdefault(page_num, []).append(df)
+        except Exception:
+            pass
+    
     return mapping
 
 
-def _get_page_text(pdf_path: Path, page_num: int) -> str:
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            if 1 <= page_num <= len(pdf.pages):
-                text = pdf.pages[page_num - 1].extract_text()
-                return text or "(No text on this page)"
-    except Exception as e:
-        return f"Error extracting text: {e}"
-    return "(Page out of range)"
 
 
 def _render_page_image(pdf_path: Path, page_num: int):
@@ -152,21 +159,10 @@ class DocState:
 doc_state = DocState()
 
 # ---------------------------------------------------------------------------
-# Lazy QA Engine
+# QA Engine (initialized at startup)
 # ---------------------------------------------------------------------------
 
 _qa_engine = None
-
-
-def _get_qa_engine():
-    global _qa_engine
-    if _qa_engine is None:
-        from investor_relations_scraper.qa_engine import QAEngine
-        print("🚀 Initializing QA Engine (first question) …")
-        _qa_engine = QAEngine(data_dir=str(PROCESSED_DIR))
-        _qa_engine.load_and_index()
-        print("✅ QA Engine ready.")
-    return _qa_engine
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +173,7 @@ def on_doc_selected(pdf_name: str):
     if not pdf_name:
         return (
             gr.update(value=1, maximum=1),
-            None, "", None, gr.update(visible=False), "",
+            None, None, gr.update(visible=False), "",
             "No document selected",
         )
     doc_state.load(pdf_name)
@@ -188,7 +184,7 @@ def on_page_change(page_num, pdf_name: str):
     if not pdf_name:
         return (
             gr.update(),
-            None, "", None, gr.update(visible=False), "",
+            None, None, gr.update(visible=False), "",
             "Select a document first",
         )
     doc_state.load(pdf_name)
@@ -201,14 +197,11 @@ def _build_page_outputs(pdf_name: str, page_num: int):
     total = doc_state.total_pages
 
     img = _render_page_image(pdf_path, page_num)
-    text = _get_page_text(pdf_path, page_num)
 
     page_tables = doc_state.table_map.get(page_num, [])
     if page_tables:
         table_df = page_tables[0]
         table_visible = True
-        if len(page_tables) > 1:
-            text += f"\n\n📊 {len(page_tables)} tables on this page (showing first)."
     else:
         table_df = None
         table_visible = False
@@ -219,7 +212,7 @@ def _build_page_outputs(pdf_name: str, page_num: int):
 
     return (
         gr.update(value=page_num, maximum=max(total, 1)),
-        img, text, table_df,
+        img, table_df,
         gr.update(visible=table_visible),
         note_text, status,
     )
@@ -256,7 +249,6 @@ def on_chat_submit(user_message: str, history: list):
     if not user_message.strip():
         return history, ""
 
-    # Append user message
     history = history + [[user_message, None]]
     return history, ""
 
@@ -270,8 +262,7 @@ def on_chat_respond(history: list):
     print(f"💬 Q: {user_message}")
 
     try:
-        qa = _get_qa_engine()
-        result = qa.answer_question(user_message)
+        result = _qa_engine.answer_question(user_message)
         answer = result.get("answer", "Sorry, I couldn't generate an answer.")
         sources = result.get("sources", [])
         if sources:
@@ -284,8 +275,7 @@ def on_chat_respond(history: list):
 
 
 def on_clear_chat():
-    qa = _get_qa_engine()
-    qa.clear_conversation()
+    _qa_engine.clear_conversation()
     return []
 
 
@@ -294,7 +284,6 @@ def on_clear_chat():
 # ---------------------------------------------------------------------------
 
 CSS = """
-#left-col  { border-right: 1px solid #e0e0e0; }
 #right-col { border-left:  1px solid #e0e0e0; }
 footer     { display: none !important; }
 """
@@ -311,7 +300,7 @@ with gr.Blocks(
     # ── Header ──
     gr.Markdown(
         "# 📊 Equinor Investor Relations Explorer\n"
-        "Browse reports page-by-page · inspect extracted content · "
+        "Browse reports page-by-page · view tables · "
         "take notes · ask questions"
     )
 
@@ -333,16 +322,15 @@ with gr.Blocks(
             value="Select a document to begin",
         )
 
-    # ── Three-column layout ──
+    # ── Two-column layout ──
     with gr.Row(equal_height=True):
 
-        # LEFT — extracted content
-        with gr.Column(scale=1, elem_id="left-col"):
-            gr.Markdown("### 📝 Extracted Text")
-            extracted_text = gr.Textbox(
-                label="Page text (pdfplumber)",
-                lines=18, max_lines=30,
-                interactive=False, show_copy_button=True,
+        # LEFT — PDF page image + tables
+        with gr.Column(scale=3):
+            gr.Markdown("### 🖼️ Original PDF Page")
+            page_image = gr.Image(
+                label="Page render", type="pil",
+                show_download_button=True,
             )
             table_group = gr.Group(visible=False)
             with table_group:
@@ -350,14 +338,6 @@ with gr.Blocks(
                 extracted_table = gr.Dataframe(
                     label="Cleaned CSV", interactive=False, wrap=True,
                 )
-
-        # CENTER — PDF page image
-        with gr.Column(scale=2):
-            gr.Markdown("### 🖼️ Original PDF Page")
-            page_image = gr.Image(
-                label="Page render", type="pil",
-                show_download_button=True,
-            )
 
         # RIGHT — notes
         with gr.Column(scale=1, elem_id="right-col"):
@@ -400,7 +380,7 @@ with gr.Blocks(
     # ── Wiring: Document Inspector ──
 
     shared_outputs = [
-        page_slider, page_image, extracted_text,
+        page_slider, page_image,
         extracted_table, table_group, note_area, status_box,
     ]
 
@@ -454,4 +434,13 @@ with gr.Blocks(
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     config.ensure_directories()
+
+    # Pre-load QA Engine at startup (uses cached index if files haven't changed)
+    from investor_relations_scraper.qa_engine import QAEngine
+    print("🚀 Initializing QA Engine at startup…")
+    _qa_engine = QAEngine(data_dir=str(PROCESSED_DIR))
+    _qa_engine.load_and_index()
+    print("✅ QA Engine ready — launching server.")
+
     demo.launch(server_name="0.0.0.0", server_port=7860)
+

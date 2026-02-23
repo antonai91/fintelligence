@@ -19,7 +19,7 @@ import pdfplumber
 from openai import AsyncOpenAI
 
 from . import config
-from .extractors import PdfPlumberExtractor, Qwen25VLExtractor, FallbackPDFExtractor
+from .extractors import PdfPlumberExtractor, OllamaVisionExtractor
 
 # Constants
 MIN_TABLE_ROWS = 2
@@ -60,21 +60,10 @@ class PDFExtractor:
         
         # Select PDF extraction strategy based on config
         method = config.PDF_EXTRACTION_METHOD
-        if method == "qwen-vl":
-            self.extractor = Qwen25VLExtractor(
-                model_path=config.QWEN_VL_MODEL_PATH,
-                model_file=config.QWEN_VL_MODEL_FILE,
-                n_gpu_layers=config.QWEN_VL_N_GPU_LAYERS,
-                n_ctx=config.QWEN_VL_N_CTX,
-                verbose=config.QWEN_VL_VERBOSE,
-            )
-        elif method == "fallback":
-            self.extractor = FallbackPDFExtractor(
-                model_path=config.QWEN_VL_MODEL_PATH,
-                model_file=config.QWEN_VL_MODEL_FILE,
-                n_gpu_layers=config.QWEN_VL_N_GPU_LAYERS,
-                n_ctx=config.QWEN_VL_N_CTX,
-                verbose=config.QWEN_VL_VERBOSE,
+        if method == "ollama-vision":
+            self.extractor = OllamaVisionExtractor(
+                api_key="ollama",  # Generic key for local proxy
+                model=config.MODEL_TABLE_EXTRACTOR,
             )
         else:  # "pdfplumber" or any unknown value
             self.extractor = PdfPlumberExtractor()
@@ -393,32 +382,38 @@ Return ONLY the CSV data (with headers), nothing else."""
             return
             
         print(f"  Found {len(tables)} tables")
-        
+
+        # Ollama vision already outputs clean CSV — skip the redundant cleaning pass
+        from .extractors import OllamaVisionExtractor
+        vision_extracted = isinstance(self.extractor, OllamaVisionExtractor)
+        effective_clean = clean and not vision_extracted
+        if vision_extracted and clean:
+            print("  ⚡ Ollama vision tables are already clean — skipping OpenAI cleaning pass")
+
         async def process_single_table(idx: int, page_num: int, df: pd.DataFrame):
-            if clean:
-                # print(f"  🤖 Processing table {idx}...", end="", flush=True)
+            if effective_clean:
                 cleaned_df = await self.process_table_with_openai(df, page_num, idx)
             else:
                 cleaned_df = df
-            
+
             if cleaned_df is not None and not cleaned_df.empty:
-                csv_file = self.processed_dir / f"{base_name}_table_{idx}.csv"
-                # file processing in main thread is fine for small files
+                csv_file = self.processed_dir / f"{base_name}_table_p{page_num}_{idx}.csv"
                 cleaned_df.to_csv(csv_file, index=False)
                 results["table_files"].append(csv_file.name)
             else:
                 results["errors"].append(f"Failed to process table {idx}")
 
         # Process tables concurrently
-        if clean:
+        if effective_clean:
             print(f"  Processing {len(tables)} tables in parallel...")
             tasks = [process_single_table(idx, page_num, df) for idx, (page_num, df) in enumerate(tables, TABLE_INDEX_START)]
             await asyncio.gather(*tasks)
         else:
-            print("  ⏩ Skipping table cleaning (saving raw CSVs)")
+            if not vision_extracted:
+                print("  ⏩ Skipping table cleaning (saving raw CSVs)")
             for idx, (page_num, df) in enumerate(tables, TABLE_INDEX_START):
                 await process_single_table(idx, page_num, df)
-                
+
         print(f"  ✓ Saved {len(results['table_files'])} tables")
     
     async def process_all_pdfs(

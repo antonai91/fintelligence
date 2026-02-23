@@ -3,11 +3,15 @@ Concrete implementations of PDF extraction strategies.
 
 This module provides different strategies for extracting text and tables from PDFs:
 - PdfPlumberExtractor: Fast text-based extraction using pdfplumber
-- Qwen25VLExtractor: OCR-based extraction using Qwen2.5-VL-3B-Instruct-GGUF
+- OllamaVisionExtractor: Vision-based table extraction using local Ollama
 """
 
+import base64
+import re
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import List, Tuple, Optional
+
 import pandas as pd
 import pdfplumber
 
@@ -16,395 +20,225 @@ from .base import BasePDFExtractor
 
 class PdfPlumberExtractor(BasePDFExtractor):
     """Extract text and tables from PDFs using pdfplumber (fast, good for text-based PDFs)."""
-    
+
     def extract_text(self, pdf_path: Path) -> str:
-        """
-        Extract raw text from PDF file using pdfplumber.
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            Extracted text as string
-        """
+        """Extract raw text from PDF using pdfplumber."""
         text_content = []
-        
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 for page_num, page in enumerate(pdf.pages, 1):
                     text = page.extract_text()
                     if text:
                         text_content.append(f"--- Page {page_num} ---\n{text}")
-                        
             return "\n\n".join(text_content)
         except Exception as e:
             print(f"✗ Error extracting text from {pdf_path.name}: {str(e)}")
             return ""
-    
+
     def extract_tables(self, pdf_path: Path) -> List[Tuple[int, pd.DataFrame]]:
-        """
-        Extract tables from PDF file using pdfplumber.
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            List of tuples (page_number, DataFrame)
-        """
+        """Extract tables from PDF using pdfplumber, using first row as headers."""
         tables = []
-        
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 for page_num, page in enumerate(pdf.pages, 1):
-                    page_tables = page.extract_tables()
-                    
-                    for table_data in page_tables:
-                        if table_data and len(table_data) > 0:
-                            # Convert to DataFrame
-                            df = pd.DataFrame(table_data)
-                            
-                            # Skip empty tables
-                            if not df.empty and df.shape[0] > 1:
+                    for table_data in page.extract_tables():
+                        if table_data and len(table_data) > 1:
+                            raw_headers = table_data[0]
+                            headers = [
+                                str(h).strip() if h else f"Col{i+1}"
+                                for i, h in enumerate(raw_headers)
+                            ]
+                            # Deduplicate headers
+                            seen: dict = {}
+                            for i, h in enumerate(headers):
+                                if h in seen:
+                                    seen[h] += 1
+                                    headers[i] = f"{h}_{seen[h]}"
+                                else:
+                                    seen[h] = 0
+                            rows = [
+                                [str(c).strip() if c else "" for c in row]
+                                for row in table_data[1:]
+                            ]
+                            df = pd.DataFrame(rows, columns=headers)
+                            if not df.empty:
                                 tables.append((page_num, df))
-                                
             return tables
         except Exception as e:
             print(f"✗ Error extracting tables from {pdf_path.name}: {str(e)}")
             return []
-    
+
     def supports_ocr(self) -> bool:
-        """pdfplumber does not use OCR."""
         return False
-    
+
     def get_name(self) -> str:
-        """Get the name of this extractor."""
         return "pdfplumber"
 
 
-class Qwen25VLExtractor(BasePDFExtractor):
+class OllamaVisionExtractor(BasePDFExtractor):
     """
-    Extract text from PDFs using Qwen2.5-VL-3B-Instruct-GGUF model.
-    
-    This extractor converts PDF pages to images and uses a vision-language model
-    for OCR. It's better for scanned PDFs and complex layouts, but slower than pdfplumber.
+    Extract tables from PDFs using a local Ollama vision model.
+
+    Renders each PDF page as an image and prompts Ollama (e.g., llava-phi3) 
+    to extract all tables as properly formatted CSV.
+    Text extraction still uses pdfplumber (fast and accurate for digital PDFs).
     """
-    
-    def __init__(
-        self,
-        model_path: str = "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF",
-        model_file: str = "qwen2_5-vl-3b-instruct-q4_k_m.gguf",
-        n_gpu_layers: int = -1,
-        n_ctx: int = 4096,
-        verbose: bool = False
-    ):
+
+    def __init__(self, api_key: Optional[str] = "ollama", model: str = "llava-phi3"):
         """
-        Initialize the Qwen2.5-VL extractor.
-        
         Args:
-            model_path: HuggingFace model ID or local path
-            model_file: Specific GGUF file to use
-            n_gpu_layers: Number of layers to offload to GPU (-1 for all, uses Metal on Mac)
-            n_ctx: Context window size
-            verbose: Whether to print verbose llama.cpp output
+            api_key: Dummy key for OpenAI client
+            model: Ollama model to use for vision
         """
-        self.model_path = model_path
-        self.model_file = model_file
-        self.n_gpu_layers = n_gpu_layers
-        self.n_ctx = n_ctx
-        self.verbose = verbose
-        self._model = None
-        self._initialized = False
-    
-    def _initialize_model(self):
-        """Lazy initialization of the model (only load when needed)."""
-        if self._initialized:
-            return
-        
-        try:
-            from llama_cpp import Llama
-            from llama_cpp.llama_chat_format import Llava15ChatHandler
-            
-            print(f"Loading Qwen2.5-VL model from {self.model_path}...")
-            print(f"  Model file: {self.model_file}")
-            print(f"  GPU layers: {self.n_gpu_layers} (Metal acceleration on Mac)")
-            
-            # Initialize the model with vision support
-            self._model = Llama.from_pretrained(
-                repo_id=self.model_path,
-                filename=self.model_file,
-                n_gpu_layers=self.n_gpu_layers,
-                n_ctx=self.n_ctx,
-                verbose=self.verbose,
-                chat_format="llava-1-5"  # Use LLaVA chat format for vision models
+        self._api_key = api_key
+        self.model = model
+        self._client = None
+        self._pdfplumber = PdfPlumberExtractor()
+
+    @property
+    def client(self):
+        """Lazy OpenAI client initialization."""
+        if self._client is None:
+            from openai import OpenAI
+            from .. import config  # config is in parent package, not extractors/
+            self._client = OpenAI(
+                base_url=getattr(config, "OLLAMA_API_BASE", "http://localhost:11434/v1"),
+                api_key=self._api_key or "ollama"
             )
-            
-            self._initialized = True
-            print("✓ Model loaded successfully")
-            
-        except ImportError:
-            raise ImportError(
-                "llama-cpp-python is required for Qwen2.5-VL extraction. "
-                "Install it with: pip install llama-cpp-python"
-            )
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize Qwen2.5-VL model: {e}")
-    
-    def _pdf_to_images(self, pdf_path: Path) -> List[Tuple[int, any]]:
+        return self._client
+
+    def _pdf_pages_to_images(self, pdf_path: Path) -> List[Tuple[int, str]]:
         """
-        Convert PDF pages to images.
-        
-        Args:
-            pdf_path: Path to PDF file
-            
+        Convert PDF pages to base64-encoded PNG images.
+
         Returns:
-            List of tuples (page_number, PIL.Image)
+            List of (page_num, base64_data_uri) tuples
         """
         try:
             from pdf2image import convert_from_path
-            
-            print(f"  Converting PDF to images...")
-            images = convert_from_path(pdf_path)
-            return [(i + 1, img) for i, img in enumerate(images)]
-            
+            images = convert_from_path(pdf_path, dpi=150)
+            result = []
+            for i, img in enumerate(images, 1):
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                result.append((i, f"data:image/png;base64,{b64}"))
+            return result
         except ImportError:
             raise ImportError(
-                "pdf2image is required for Qwen2.5-VL extraction. "
-                "Install it with: pip install pdf2image"
+                "pdf2image is required for vision extraction. "
+                "Install it with: uv add pdf2image"
             )
         except Exception as e:
-            print(f"✗ Error converting PDF to images: {e}")
+            print(f"✗ Error converting {pdf_path.name} to images: {e}")
             return []
-    
-    def _extract_text_from_image(self, image: any, page_num: int) -> str:
-        """
-        Extract text from a single image using Qwen2.5-VL.
-        
-        Args:
-            image: PIL Image
-            page_num: Page number for logging
-            
-        Returns:
-            Extracted text
-        """
-        import base64
-        from io import BytesIO
-        
+
+    def _extract_tables_from_image(self, data_uri: str, page_num: int) -> List[pd.DataFrame]:
+        """Send a page image to Ollama and parse any tables as DataFrames."""
         try:
-            # Convert image to base64 for llama.cpp
-            buffered = BytesIO()
-            image.save(buffered, format="PNG")
-            img_base64 = base64.b64encode(buffered.getvalue()).decode()
-            data_uri = f"data:image/png;base64,{img_base64}"
-            
-            # Create prompt for OCR
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": data_uri}},
-                        {"type": "text", "text": "Extract all text from this image. Preserve the layout and structure as much as possible. Return only the extracted text, no explanations."}
-                    ]
-                }
-            ]
-            
-            # Generate response
-            response = self._model.create_chat_completion(
-                messages=messages,
-                max_tokens=2048,
-                temperature=0.0
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
+                            {"type": "text", "text": (
+                                "Extract ALL tables from this financial report page.\n"
+                                "For each table output it as CSV:\n"
+                                "- Use the exact column headers from the document\n"
+                                "- Keep the row label/description in the first column\n"
+                                "- Preserve all numbers exactly as shown\n"
+                                "- For merged cells, repeat the value in each affected cell\n"
+                                "- Remove any footnote markers (*, **, 1, 2 etc.) from cells\n"
+                                "If multiple tables exist, separate them with a line containing only: ---TABLE---\n"
+                                "If NO tables exist on this page, respond with exactly: NO_TABLES\n"
+                                "Return ONLY the CSV data, no explanations, no markdown fences."
+                            )}
+                        ]
+                    }
+                ],
+                max_tokens=4096,
+                temperature=0.0,
             )
-            
-            extracted_text = response["choices"][0]["message"]["content"]
-            return extracted_text
-            
-        except Exception as e:
-            print(f"  ✗ Error extracting text from page {page_num}: {e}")
-            return ""
-    
-    def extract_text(self, pdf_path: Path) -> str:
-        """
-        Extract text from PDF using Qwen2.5-VL OCR.
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            Extracted text as string
-        """
-        self._initialize_model()
-        
-        # Convert PDF to images
-        images = self._pdf_to_images(pdf_path)
-        if not images:
-            return ""
-        
-        print(f"  Processing {len(images)} pages with Qwen2.5-VL...")
-        text_content = []
-        
-        for page_num, image in images:
-            print(f"  Processing page {page_num}/{len(images)}...")
-            text = self._extract_text_from_image(image, page_num)
-            if text:
-                text_content.append(f"--- Page {page_num} ---\n{text}")
-        
-        return "\n\n".join(text_content)
-    
-    def extract_tables(self, pdf_path: Path) -> List[Tuple[int, pd.DataFrame]]:
-        """
-        Extract tables from PDF using Qwen2.5-VL.
-        
-        Note: This is a simplified implementation. For production use,
-        you might want to add specific table extraction prompts.
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            List of tuples (page_number, DataFrame)
-        """
-        # For now, we'll return empty list as table extraction with VLM
-        # requires more sophisticated prompting and parsing
-        # This can be enhanced later if needed
-        print("  Note: Table extraction not yet implemented for Qwen2.5-VL")
-        return []
-    
-    def supports_ocr(self) -> bool:
-        """Qwen2.5-VL uses OCR."""
-        return True
-    
-    def get_name(self) -> str:
-        """Get the name of this extractor."""
-        return "Qwen2.5-VL-3B-Instruct-GGUF"
 
+            content = response.choices[0].message.content.strip()
+            if not content or content == "NO_TABLES":
+                return []
 
-class FallbackPDFExtractor(BasePDFExtractor):
-    """
-    Fallback PDF extractor: uses pdfplumber first, falls back to Qwen2.5-VL OCR per-page.
-    
-    This extractor iterates page-by-page. For each page, pdfplumber is tried first.
-    If pdfplumber returns no text (e.g. scanned/image-based page), that single page
-    is sent through the Qwen2.5-VL vision-language model for OCR.
-    
-    The Qwen model is only loaded if a fallback is actually needed, keeping the
-    fast path for fully digital PDFs.
-    """
-    
-    def __init__(
-        self,
-        model_path: str = "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF",
-        model_file: str = "qwen2_5-vl-3b-instruct-q4_k_m.gguf",
-        n_gpu_layers: int = -1,
-        n_ctx: int = 4096,
-        verbose: bool = False
-    ):
-        """
-        Initialize the fallback extractor.
-        
-        Args:
-            model_path: HuggingFace model ID or local path for Qwen2.5-VL
-            model_file: Specific GGUF file to use
-            n_gpu_layers: Number of layers to offload to GPU (-1 for all)
-            n_ctx: Context window size
-            verbose: Whether to print verbose llama.cpp output
-        """
-        self._pdfplumber = PdfPlumberExtractor()
-        self._qwen: Optional[Qwen25VLExtractor] = None
-        
-        # Store Qwen config for lazy initialization
-        self._qwen_config = {
-            "model_path": model_path,
-            "model_file": model_file,
-            "n_gpu_layers": n_gpu_layers,
-            "n_ctx": n_ctx,
-            "verbose": verbose,
-        }
-    
-    def _get_qwen(self) -> Qwen25VLExtractor:
-        """Lazily initialize the Qwen extractor only when needed."""
-        if self._qwen is None:
-            print("  🔄 Initializing Qwen2.5-VL OCR for fallback...")
-            self._qwen = Qwen25VLExtractor(**self._qwen_config)
-        return self._qwen
-    
-    def extract_text(self, pdf_path: Path) -> str:
-        """
-        Extract text page-by-page, falling back to Qwen OCR for pages with no text.
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            Extracted text as string
-        """
-        text_content = []
-        fallback_count = 0
-        
-        try:
-            with pdfplumber.open(pdf_path) as pdf:
-                total_pages = len(pdf.pages)
-                
-                for page_num, page in enumerate(pdf.pages, 1):
-                    text = page.extract_text()
-                    
-                    if text and text.strip():
-                        # pdfplumber succeeded
-                        text_content.append(f"--- Page {page_num} ---\n{text}")
-                    else:
-                        # pdfplumber returned no text — fall back to Qwen OCR
-                        print(f"  ⚠ Page {page_num}/{total_pages}: pdfplumber returned no text, falling back to Qwen OCR...")
-                        fallback_count += 1
-                        
+            # Strip any accidental markdown fences
+            content = re.sub(r'^```(?:csv)?\s*', '', content, flags=re.MULTILINE)
+            content = re.sub(r'\s*```$', '', content, flags=re.MULTILINE)
+
+            tables = []
+            for block in re.split(r'\n\s*---TABLE---\s*\n', content):
+                block = block.strip()
+                if not block:
+                    continue
+                try:
+                    df = pd.read_csv(StringIO(block))
+                    if not df.empty:
+                        tables.append(df)
+                except Exception:
+                    # Try salvaging by stripping bad lines
+                    lines = [l for l in block.splitlines() if l.strip()]
+                    if len(lines) >= 2:
                         try:
-                            qwen = self._get_qwen()
-                            # Convert just this page to an image
-                            from pdf2image import convert_from_path
-                            images = convert_from_path(
-                                pdf_path,
-                                first_page=page_num,
-                                last_page=page_num
-                            )
-                            
-                            if images:
-                                qwen._initialize_model()
-                                ocr_text = qwen._extract_text_from_image(images[0], page_num)
-                                if ocr_text and ocr_text.strip():
-                                    text_content.append(f"--- Page {page_num} (OCR) ---\n{ocr_text}")
-                                    print(f"  ✓ Page {page_num}: OCR extracted {len(ocr_text)} characters")
-                                else:
-                                    print(f"  ✗ Page {page_num}: OCR also returned no text")
-                            else:
-                                print(f"  ✗ Page {page_num}: Failed to convert page to image")
-                                
-                        except ImportError as e:
-                            print(f"  ✗ Page {page_num}: OCR fallback unavailable — {e}")
-                        except Exception as e:
-                            print(f"  ✗ Page {page_num}: OCR fallback failed — {e}")
-            
-            if fallback_count > 0:
-                print(f"  📊 Extraction summary: {total_pages} pages total, {fallback_count} used OCR fallback")
-            
-            return "\n\n".join(text_content)
-            
+                            df = pd.read_csv(StringIO("\n".join(lines)))
+                            if not df.empty:
+                                tables.append(df)
+                        except Exception:
+                            pass
+            return tables
+
         except Exception as e:
-            print(f"✗ Error extracting text from {pdf_path.name}: {e}")
-            return ""
-    
-    def extract_tables(self, pdf_path: Path) -> List[Tuple[int, pd.DataFrame]]:
+            print(f"  ✗ Error extracting tables from page {page_num}: {e}")
+            return []
+
+    def extract_text(self, pdf_path: Path) -> str:
+        """Use pdfplumber for text (fast, accurate for digital PDFs)."""
+        return self._pdfplumber.extract_text(pdf_path)
+
+    def extract_tables(self, pdf_path: Path, max_workers: int = 10) -> List[Tuple[int, pd.DataFrame]]:
         """
-        Extract tables using pdfplumber (Qwen table extraction is not implemented).
-        
+        Extract tables using Ollama vision — processes all pages in parallel.
+
         Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            List of tuples (page_number, DataFrame)
+            pdf_path: Path to PDF
+            max_workers: Max concurrent API calls (default 10)
         """
-        return self._pdfplumber.extract_tables(pdf_path)
-    
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        images = self._pdf_pages_to_images(pdf_path)
+        if not images:
+            return []
+
+        print(f"  Extracting tables from {len(images)} pages with Ollama vision (parallel, {max_workers} workers)...")
+        all_tables: List[Tuple[int, pd.DataFrame]] = []
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_page = {
+                executor.submit(self._extract_tables_from_image, data_uri, page_num): page_num
+                for page_num, data_uri in images
+            }
+            for future in as_completed(future_to_page):
+                page_num = future_to_page[future]
+                try:
+                    page_tables = future.result()
+                    if page_tables:
+                        print(f"  ✓ Page {page_num}: found {len(page_tables)} table(s)")
+                        for df in page_tables:
+                            all_tables.append((page_num, df))
+                except Exception as e:
+                    print(f"  ✗ Page {page_num} failed: {e}")
+
+        # Sort by page number for consistent ordering
+        all_tables.sort(key=lambda t: t[0])
+        print(f"  📊 Total tables extracted: {len(all_tables)}")
+        return all_tables
+
     def supports_ocr(self) -> bool:
-        """This extractor supports OCR via Qwen fallback."""
         return True
-    
+
     def get_name(self) -> str:
-        """Get the name of this extractor."""
-        return "Fallback (pdfplumber + Qwen2.5-VL OCR)"
+        return f"Ollama Vision ({self.model})"

@@ -1,8 +1,7 @@
 """
-Investor Relations Scraper Package
+Investor Relations Package
 
-A Python package for scraping, processing, and analyzing financial reports
-from investor relations websites.
+A Python package for processing and analyzing financial reports.
 """
 
 __version__ = "0.1.0"
@@ -15,10 +14,8 @@ from .extractors import (
     RegexMetadataExtractor,
     HybridMetadataExtractor,
     PdfPlumberExtractor,
-    Qwen25VLExtractor,
-    FallbackPDFExtractor,
+    OllamaVisionExtractor,
 )
-from .scraper import EquinorScraper
 from .qa_engine import QAEngine
 from .document_loader import ProcessedDocumentLoader
 from .search import PersistentVectorStore, HybridSearchEngine
@@ -32,9 +29,7 @@ __all__ = [
     "RegexMetadataExtractor",
     "HybridMetadataExtractor",
     "PdfPlumberExtractor",
-    "Qwen25VLExtractor",
-    "FallbackPDFExtractor",
-    "EquinorScraper",
+    "OllamaVisionExtractor",
     "QAEngine",
     "ProcessedDocumentLoader",
     "PersistentVectorStore",

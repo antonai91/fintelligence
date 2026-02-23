@@ -39,7 +39,7 @@ MODEL_QA = "gpt-4o-mini"
 
 # Model for metadata extraction from document content
 # Uses GPT-4 for high-quality metadata extraction
-MODEL_METADATA = "gpt-4o"
+MODEL_METADATA = "gpt-4o-mini"
 
 # Model for embeddings
 # Using BAAI/bge-small-en-v1.5 (lightweight, fast, excellent for RAG)
@@ -53,31 +53,21 @@ MODEL_DEVICE = None
 # ============================================================================
 
 # PDF extraction method
-# Options: "pdfplumber" (fast, text-based), "qwen-vl" (OCR, scanned PDFs), "fallback" (pdfplumber + OCR per-page)
-PDF_EXTRACTION_METHOD = "fallback"
+# Options: "pdfplumber" (fast, text-based), "ollama-vision" (local Ollama vision model)
+PDF_EXTRACTION_METHOD = "ollama-vision"
 
 # Metadata extraction method
 # Options: "llm" (intelligent, uses OpenAI), "regex" (fast, filename-based), "hybrid" (tries LLM, falls back to regex)
 METADATA_EXTRACTION_METHOD = "hybrid"
 
 # ============================================================================
-# Qwen2.5-VL Configuration (for OCR-based PDF extraction)
+# Ollama Vision Table Extraction Configuration
 # ============================================================================
 
-# Qwen2.5-VL model path (HuggingFace model ID or local path)
-QWEN_VL_MODEL_PATH = "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF"
-
-# Specific GGUF file to use (Q4_K_M is a good balance of quality and size)
-QWEN_VL_MODEL_FILE = "qwen2_5-vl-3b-instruct-q4_k_m.gguf"
-
-# Number of layers to offload to GPU (-1 for all, uses Metal on Mac)
-QWEN_VL_N_GPU_LAYERS = -1
-
-# Context window size
-QWEN_VL_N_CTX = 4096
-
-# Verbose output from llama.cpp
-QWEN_VL_VERBOSE = False
+# Model for vision-based table extraction from PDF page images
+# Uses Ollama API (OpenAI compatible) for local table understanding
+MODEL_TABLE_EXTRACTOR = "llava-phi3"
+OLLAMA_API_BASE = "http://localhost:11434/v1"
 
 
 # ============================================================================

@@ -34,6 +34,21 @@ MODEL_EXTRACTOR = "gpt-4o"  # or "gpt-4o-mini"
 MODEL_QA = "gpt-4o"         # or "gpt-4o-mini"
 ```
 
+## Local LLM with Ollama (Optional)
+
+This project supports using local vision models via [Ollama](https://ollama.ai/) for high-quality table extraction.
+
+1. Install Ollama: Download and install from [ollama.ai](https://ollama.ai/).
+2. Pull the model:
+
+```bash
+ollama run llava-phi3
+```
+
+1. Configure: In `src/investor_relations_scraper/config.py`, ensure `PDF_EXTRACTION_METHOD` is set to `"ollama-vision"`.
+
+> **Note**: Ensure the Ollama app is running (check your menu bar) or run `ollama serve` in a separate terminal before starting the scraper.
+
 ## Usage
 
 ### Basic Usage
@@ -136,9 +151,9 @@ All dependencies are managed via the `pyproject.toml` file.
 The extractor processes downloaded PDFs and uses OpenAI to clean and structure the data. Three extraction methods are available (set in `config.py`):
 
 | Method | `PDF_EXTRACTION_METHOD` | Description |
-|--------|------------------------|-------------|
+| --- | --- | --- |
 | **pdfplumber** | `"pdfplumber"` | Fast, text-based extraction |
-| **Qwen2.5-VL** | `"qwen-vl"` | Full OCR via vision-language model |
+| **Ollama Vision** | `"ollama-vision"` | Local OCR via `llava-phi3` (Requires Ollama) |
 | **Fallback** (default) | `"fallback"` | pdfplumber first, OCR per-page when needed |
 
 ### Extractor Usage
