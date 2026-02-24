@@ -72,7 +72,8 @@ class PDFExtractor:
         
         # Create processed directory if it doesn't exist
         self.processed_dir.mkdir(parents=True, exist_ok=True)
-        self.semaphore = asyncio.Semaphore(5)  # Limit concurrent PDF processing
+        max_pdfs = getattr(config, "MAX_CONCURRENT_PDFS", 10)
+        self.semaphore = asyncio.Semaphore(max_pdfs)  # Limit concurrent PDF processing
         
     def extract_text_from_pdf(self, pdf_path: Path) -> str:
         """
@@ -428,7 +429,7 @@ Return ONLY the CSV data (with headers), nothing else."""
         
         Args:
             skip_text: Skip text extraction
-            skip_tables: Skip table extraction
+            extract_tables: Extract tables (default is to skip)
             clean: Whether to clean text/tables with OpenAI
             file_pattern: Glob pattern for PDF files (default: "*.pdf")
             
@@ -508,7 +509,7 @@ async def main_async() -> None:
     parser.add_argument(
         '--skip-tables',
         action='store_true',
-        help='Skip table extraction'
+        help='Skip table extraction (on by default)'
     )
     parser.add_argument(
         '--no-cleaning',
@@ -550,10 +551,12 @@ async def main_async() -> None:
             print(f"❌ Error: File not found: {pdf_path}")
             return
         
-        results = [await extractor.process_pdf(pdf_path, args.skip_text, args.skip_tables, clean)]
+        skip_tables = args.skip_tables
+        results = [await extractor.process_pdf(pdf_path, args.skip_text, skip_tables, clean)]
     else:
         # Process all files
-        results = await extractor.process_all_pdfs(args.skip_text, args.skip_tables, clean)
+        skip_tables = args.skip_tables
+        results = await extractor.process_all_pdfs(args.skip_text, skip_tables, clean)
     
     # Print summary
     extractor.print_summary(results)

@@ -69,7 +69,10 @@ METADATA_EXTRACTION_METHOD = "hybrid"
 MODEL_TABLE_EXTRACTOR = "llava-phi3"
 OLLAMA_API_BASE = "http://localhost:11434/v1"
 
-
+# Number of concurrent Ollama vision requests per PDF
+# IMPORTANT: Start Ollama with `OLLAMA_NUM_PARALLEL=4 ollama serve` (or higher) 
+# to actually utilize parallel processing and maximize Mac CPU/GPU usage.
+OLLAMA_VISION_MAX_WORKERS = 10
 # ============================================================================
 # Directory Configuration
 # ============================================================================
@@ -83,6 +86,9 @@ RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
 INTERIM_DIR = DATA_DIR / "interim"
 VECTOR_DB_DIR = DATA_DIR / "vector_db"
+
+# DuckDB Database Path
+TABLE_DB_PATH = VECTOR_DB_DIR / "tables.duckdb"
 
 # ============================================================================
 # Processing Configuration
@@ -99,6 +105,9 @@ BATCH_SIZE = 10
 
 # Batch size for generating embeddings
 EMBEDDING_BATCH_SIZE = 32
+
+# Maximum number of PDFs to process concurrently
+MAX_CONCURRENT_PDFS = 10
 
 # Maximum number of documents the agentic planner can select
 MAX_PLANNED_SOURCES = 10
@@ -180,6 +189,8 @@ def print_config():
     print(f"Temperature: {TEMPERATURE}")
     print(f"Max Text Chars: {MAX_TEXT_CHARS:,}")
     print(f"Top K Documents: {TOP_K_DOCUMENTS}")
+    print(f"Max Concurrent PDFs: {MAX_CONCURRENT_PDFS}")
+    print(f"Ollama Vision Max Workers: {OLLAMA_VISION_MAX_WORKERS}")
     print(f"Raw Directory: {RAW_DIR}")
     print(f"Processed Directory: {PROCESSED_DIR}")
     print("=" * 60)

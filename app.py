@@ -241,6 +241,74 @@ def on_next_page(page_num, pdf_name):
 
 
 # ---------------------------------------------------------------------------
+# Callbacks — Interactive Table Extraction
+# ---------------------------------------------------------------------------
+
+def on_extract_page_table(pdf_name: str, page_num: int):
+    """Call Ollama vision model to extract tables from the current page."""
+    if not pdf_name:
+        return None, gr.update(visible=False), "⚠ No document selected"
+
+    try:
+        from investor_relations_scraper.extractors import OllamaVisionExtractor
+        extractor = OllamaVisionExtractor(api_key="ollama", model=config.MODEL_TABLE_EXTRACTOR)
+        pdf_path = RAW_DIR / pdf_name
+
+        # The image logic inside OllamaVisionExtractor uses base64 data URIs.
+        # We can extract just the one page by passing a temporary PDF or adjusting the extractor.
+        # But PdfPlumberExtractor to_image is easier for a single page proxy:
+        images = extractor._pdf_pages_to_images(pdf_path)
+        
+        # images is 1-indexed: [(1, data_uri), ...]
+        page_uri = None
+        for p, uri in images:
+            if p == int(page_num):
+                page_uri = uri
+                break
+                
+        if not page_uri:
+            return None, gr.update(visible=False), f"⚠ Could not render page {page_num}"
+
+        tables = extractor._extract_tables_from_image(page_uri, int(page_num))
+        
+        if not tables:
+            return None, gr.update(visible=False), "ℹ No tables found on this page by Vision model."
+            
+        # For simplicity, if multiple tables are found on one page, we just concatenate them 
+        # or grab the biggest one. Here we grab the first.
+        df = tables[0]
+        return df, gr.update(visible=True), f"✅ Extracted {len(tables)} table(s). Editing the first one."
+        
+    except Exception as e:
+        return None, gr.update(visible=False), f"❌ Extraction error: {str(e)}"
+
+def on_save_extracted_table(df: pd.DataFrame, pdf_name: str, page_num: int):
+    """Save the edited dataframe to a CSV file and update the document state."""
+    if df is None or df.empty:
+        return "⚠ No data to save."
+        
+    try:
+        base_name = Path(pdf_name).stem
+        # Always use idx=1 to force overwriting any existing main extracted table for this page
+        page_num_int = int(page_num)
+        idx = 1
+        
+        csv_file = PROCESSED_DIR / f"{base_name}_table_p{page_num_int}_{idx}.csv"
+        df.to_csv(csv_file, index=False)
+        
+        # Update memory state (replace list entirely to ensure overwritten state)
+        doc_state.table_map[page_num_int] = [df]
+        
+        # Propagate the updated CSV to DuckDB
+        if _qa_engine and hasattr(_qa_engine, 'db_manager'):
+            _qa_engine.db_manager.reload_csv(csv_file.name)
+        
+        return f"✅ Saved and synced to {csv_file.name}!"
+    except Exception as e:
+        return f"❌ Save error: {str(e)}"
+
+
+# ---------------------------------------------------------------------------
 # Callbacks — Chat (manual Chatbot, avoids gr.ChatInterface schema bug)
 # ---------------------------------------------------------------------------
 
@@ -332,9 +400,24 @@ with gr.Blocks(
                 label="Page render", type="pil",
                 show_download_button=True,
             )
+            
+            # Interactive Ollama Extraction
+            with gr.Row():
+                extract_btn = gr.Button("🔍 Extract Tables with Ollama (This Page)", variant="secondary")
+            
+            extract_status = gr.Textbox(label="Extraction Status", interactive=False, visible=False)
+            
+            extract_group = gr.Group(visible=False)
+            with extract_group:
+                gr.Markdown("### ✏️ Edit Extracted Table")
+                editable_table = gr.Dataframe(
+                    label="Editable CSV", interactive=True, wrap=True,
+                )
+                save_table_btn = gr.Button("💾 Save Table to CSV", variant="primary")
+            
             table_group = gr.Group(visible=False)
             with table_group:
-                gr.Markdown("### 📊 Extracted Table")
+                gr.Markdown("### 📊 Existing Tables for this Page")
                 extracted_table = gr.Dataframe(
                     label="Cleaned CSV", interactive=False, wrap=True,
                 )
@@ -402,6 +485,32 @@ with gr.Blocks(
     save_note_btn.click(
         fn=on_save_note, inputs=[pdf_dropdown, page_slider, note_area],
         outputs=[note_status],
+    )
+    
+    # ── Wiring: Interactive Table Extraction ──
+    
+    extract_btn.click(
+        fn=lambda: gr.update(visible=True, value="⏳ Extracting... this may take a moment to run locally."),
+        outputs=[extract_status]
+    ).then(
+        fn=on_extract_page_table,
+        inputs=[pdf_dropdown, page_slider],
+        outputs=[editable_table, extract_group, extract_status]
+    )
+    
+    save_table_btn.click(
+        fn=on_save_extracted_table,
+        inputs=[editable_table, pdf_dropdown, page_slider],
+        outputs=[extract_status]
+    ).then(
+        # Refresh the UI to show the newly saved table under "Existing Tables"
+        fn=on_page_change,
+        inputs=[page_slider, pdf_dropdown],
+        outputs=shared_outputs
+    ).then(
+        # Hide the editor group after saving
+        fn=lambda: gr.update(visible=False),
+        outputs=[extract_group]
     )
 
     # ── Wiring: Chat ──

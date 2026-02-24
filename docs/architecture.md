@@ -1,25 +1,25 @@
-# Technical Documentation: Investor Relations Scraper & QA Engine
+# Technical Documentation: Investor Relations Document Explorer & QA Engine
 
 ## 1. Solution Overview
 
-This solution is an automated system designed to scrape, process, and analyze financial reports from Equinor's Investor Relations website. It creates a searchable knowledge base using Retrieval-Augmented Generation (RAG) to answer user queries about the company's financial performance.
+This solution is an automated system designed to process and analyze financial reports from Equinor's Investor Relations. It creates a searchable knowledge base using Retrieval-Augmented Generation (RAG) to answer user queries about the company's financial performance.
 
 ## 2. System Architecture
 
-The solution consists of three main modules:
+The solution consists of four main modules:
 
-1. **Scraper**: Automates the periodic retrieval of new financial documents.
-2. **Extractor**: Converts raw PDFs into clean, machine-readable text and structured data.
+1. **Extractor**: Converts raw PDFs into clean, machine-readable text and structured data.
+2. **Interactive UI**: A unified Gradio frontend for exploring, extracting tables, and chatting.
 3. **QA Engine**: Indexes the processed data and provides a conversational interface for querying.
 
 ### Directory Structure
 
-```
+```text
 investor_relations_scraper/
+├── app.py                 # Gradio Interactive E-Reader Frontend
 ├── src/
 │   └── investor_relations_scraper/
 │       ├── config.py              # Central configuration
-│       ├── scraper.py             # Playwright scraper
 │       ├── cli.py                 # PDF extractor CLI
 │       ├── document_loader.py     # Document loading, chunking & metadata
 │       ├── search.py              # FAISS vector store & hybrid search engine
@@ -28,7 +28,7 @@ investor_relations_scraper/
 │       └── extractors/            # PDF extraction strategies
 │           ├── base.py            # Abstract base classes
 │           ├── metadata_extractors.py
-│           └── pdf_extractors.py  # PdfPlumber, Qwen2.5-VL, Fallback
+│           └── pdf_extractors.py  # PdfPlumber and Ollama Vision
 ├── data/
 │   ├── raw/            # Downloaded PDFs
 │   ├── processed/      # Cleaned text and CSV tables
@@ -41,49 +41,40 @@ investor_relations_scraper/
 
 ## 3. Technologies & Implementation Details
 
-### 3.1. Scraper Module (`scraper.py`)
+### 3.1. Extractor Module (`cli.py` + `extractors/`)
 
-* **Technology**: `Playwright` (Async API), `aiohttp`.
-* **Target**: Equinor Quarterly Results Page.
-* **Mechanism**:
-  * Navigates to the Next.js-powered website using a headless browser.
-  * Extracts PDF metadata directly from the `__NEXT_DATA__` JSON script tag to avoid parsing fragile DOM elements.
-  * Uses `aiohttp` for reliable, high-speed direct file downloads.
-  * Supports filtering by year (e.g., "2024", "2025").
-
-### 3.2. Extractor Module (`cli.py` + `extractors/`)
-
-* **Technology**: `pdfplumber`, `Qwen2.5-VL` (via `llama-cpp-python`), `OpenAI API` (`gpt-4o`).
+* **Technology**: `pdfplumber`, `Ollama`, `OpenAI API` (`gpt-4o`/`gpt-4o-mini`).
 * **Extraction Methods** (configured via `PDF_EXTRACTION_METHOD` in `config.py`):
 
 | Method | Value | Description |
-|--------|-------|-------------|
+| --- | --- | --- |
 | **pdfplumber** | `"pdfplumber"` | Fast, text-based extraction for digital PDFs |
-| **Qwen2.5-VL** | `"qwen-vl"` | Full OCR using a vision-language model for scanned PDFs |
-| **Fallback** (default) | `"fallback"` | Uses pdfplumber first; for pages returning no text, falls back to Qwen2.5-VL OCR per-page. The Qwen model is lazily loaded only if needed. |
+| **Ollama Vision** | `"ollama-vision"` | Full OCR using a local vision-language model (`llava-phi3`) via Ollama |
 
 * **Process**:
-    1. **Text Extraction**: Uses the configured extraction strategy (pdfplumber, Qwen OCR, or fallback).
-    2. **Table Extraction**: Identifies and extracts tables using `pdfplumber`'s lattice/stream modes.
+    1. **Text Extraction**: Uses the configured extraction strategy (pdfplumber or Ollama OCR).
+    2. **Table Extraction**: Identifies and extracts tables (CLI batch extraction skips tables by default in favor of interactive parsing).
     3. **Cleaning & Structuring**:
-        * Uses OpenAI's `gpt-4o` to clean raw text (fix formatting, remove artifacts).
+        * Uses OpenAI's models to clean raw text (fix formatting, remove artifacts).
         * Converts extracted tables into clean CSV format.
     4. **Output Generation**:
         * `{filename}_text.txt`: Clean, embedding-ready text.
-        * `{filename}_table_{n}.csv`: Structured tabular data.
+        * `{filename}_table_p{page}_{n}.csv`: Structured tabular data mapped to specific pages.
 
-**Why the fallback approach?**
+### 3.2. Interactive E-Reader UI (`app.py`)
 
-* **Fast path**: For fully digital PDFs, only pdfplumber runs — no model loading, no GPU usage.
-* **Robust**: Scanned or image-based pages are automatically handled via OCR.
-* **Lazy loading**: The Qwen vision model is only initialized if at least one page needs OCR.
+* **Technology**: `Gradio`.
+* **Purpose**: A unified explorer providing three-column synced capability:
+  * Left side for viewing original rendered PDF pages and Interactive Vision Table Extraction.
+  * Right side for maintaining page-specific markdown notes.
+  * Bottom panel holding the Agentic QA Engine for chatting with the loaded reports.
 
 ### 3.3. QA Engine
 
 The QA engine is split across four focused modules:
 
 | Module | Class(es) | Responsibility |
-|--------|-----------|----------------|
+| --- | --- | --- |
 | `document_loader.py` | `ProcessedDocumentLoader` | Loads text/CSV files, chunks them, extracts metadata via LLM |
 | `search.py` | `PersistentVectorStore`, `HybridSearchEngine` | FAISS index persistence, hybrid semantic + BM25 search |
 | `conversation_memory.py` | `ConversationMemory` | Chat history with disk persistence |
@@ -133,16 +124,16 @@ The `QAEngine` uses a three-stage agentic pipeline:
 The system is highly configurable via `config.py` and `.env` variables:
 
 * **Models**: Switch between `gpt-4o` and `gpt-4o-mini` for different tasks to balance cost/performance.
-* **PDF Extraction**: Choose between `pdfplumber`, `qwen-vl`, or `fallback` mode.
+* **PDF Extraction**: Choose between `pdfplumber` or `ollama-vision` modes.
 * **Processing**: Adjustable chunk sizes, overlap, and token limits.
 * **Device**: Supports `cpu`, `cuda`, and `mps` (Mac).
 
 ## 5. Dependencies
 
 * `openai`: LLM interactions.
-* `playwright`: Web scraping.
 * `pdfplumber`: PDF text and table extraction.
 * `faiss-cpu` / `torch` / `sentence-transformers`: Vector search and embeddings.
 * `rank-bm25`: Keyword search.
 * `pandas` / `numpy`: Data manipulation.
-* `llama-cpp-python` / `pdf2image` (optional): Qwen2.5-VL OCR fallback.
+* `gradio`: Web interface.
+* `pdf2image` (optional): Required for rendering PDF pages as images for Ollama vision.

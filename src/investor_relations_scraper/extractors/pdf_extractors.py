@@ -199,14 +199,17 @@ class OllamaVisionExtractor(BasePDFExtractor):
         """Use pdfplumber for text (fast, accurate for digital PDFs)."""
         return self._pdfplumber.extract_text(pdf_path)
 
-    def extract_tables(self, pdf_path: Path, max_workers: int = 10) -> List[Tuple[int, pd.DataFrame]]:
+    def extract_tables(self, pdf_path: Path, max_workers: Optional[int] = None) -> List[Tuple[int, pd.DataFrame]]:
         """
         Extract tables using Ollama vision — processes all pages in parallel.
 
         Args:
             pdf_path: Path to PDF
-            max_workers: Max concurrent API calls (default 10)
+            max_workers: Max concurrent API calls (default from config)
         """
+        from .. import config
+        max_workers = max_workers or getattr(config, "OLLAMA_VISION_MAX_WORKERS", 30)
+
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         images = self._pdf_pages_to_images(pdf_path)

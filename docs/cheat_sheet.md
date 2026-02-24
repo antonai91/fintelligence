@@ -1,4 +1,4 @@
-# Scraper Quick Reference
+# Quick Reference
 
 ## Setup
 
@@ -10,14 +10,10 @@ cp .env.example .env
 
 ## Basic Commands
 
-### Scraper (Download PDFs)
+### Interactive UI
 
 ```bash
-# Download all
-uv run ir-scraper
-
-# Download specific year
-uv run ir-scraper --year 2025
+uv run python app.py
 ```
 
 ### Extractor (Process PDFs)
@@ -44,17 +40,16 @@ uv run python examples/chat_qa.py
 Set `PDF_EXTRACTION_METHOD` in `config.py`:
 
 | Value | Description |
-|-------|-------------|
+| --- | --- |
 | `"pdfplumber"` | Fast, text-based (digital PDFs only) |
-| `"qwen-vl"` | Full OCR via Qwen2.5-VL |
-| `"fallback"` (default) | pdfplumber + OCR fallback per-page |
+| `"ollama-vision"` | Full OCR via local Ollama `llava-phi3` vision model |
 
 ## Common Options
 
 ### Extractor
 
 | Option | Description |
-|--------|-------------|
+| --- | --- |
 | `--file FILENAME` | Process specific file |
 | `--skip-text` | Skip text extraction |
 | `--skip-tables` | Skip table extraction |
@@ -65,7 +60,7 @@ Set `PDF_EXTRACTION_METHOD` in `config.py`:
 ## Output Files
 
 | File | Content |
-|------|---------|
+| --- | --- |
 | `{name}_text.txt` | Clean text content |
 | `{name}_table_{n}.csv` | Extracted tables in CSV format |
 
@@ -84,7 +79,7 @@ Ensure the filename passed to `--file` exists in `data/raw/`.
 
 ## Performance Tips
 
-- **Text Only**: Use `--skip-tables` for much faster processing if you only need text search.
+- **Text Only**: Tables are extracted by default. Ensure you use `--skip-tables` for faster text search processing if you don't need tables.
 - **No Cleaning**: Use `--no-cleaning` to skip OpenAI processing for raw extraction.
 - **Process Single File**: Always test with one file first before running the full batch.
 

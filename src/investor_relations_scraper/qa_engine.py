@@ -16,6 +16,7 @@ from . import config
 from .document_loader import ProcessedDocumentLoader
 from .search import PersistentVectorStore, HybridSearchEngine
 from .conversation_memory import ConversationMemory
+from .table_db import DuckDBManager, TableQAAgent
 
 
 class QAEngine:
@@ -27,6 +28,8 @@ class QAEngine:
         self.processor = ProcessedDocumentLoader()  # Changed from PDFProcessor
         persist_directory = persist_directory or str(config.VECTOR_DB_DIR)
         self.search_engine = HybridSearchEngine(persist_directory=persist_directory)
+        self.db_manager = DuckDBManager(processed_dir=data_dir)
+        self.sql_agent = TableQAAgent(self.db_manager)
         self._client = None  # Lazy initialization
         self.is_indexed = False
         
@@ -119,6 +122,11 @@ class QAEngine:
             
         print(f"Indexing {len(documents)} text chunks...")
         self.search_engine.index_documents(documents, file_hashes)
+        
+        # Sync CSV tables into DuckDB
+        print("Syncing CSV tables into DuckDB database...")
+        self.db_manager.sync_csvs()
+        
         self.is_indexed = True
         print("✓ Indexing complete!")
         
@@ -137,14 +145,6 @@ class QAEngine:
             source = meta.get("source", "unknown")
             doc_type = meta.get("doc_type", "unknown")
             
-            if doc_type == "table":
-                # Collect table summaries grouped by source PDF
-                if source not in table_summaries:
-                    table_summaries[source] = []
-                summary = meta.get("table_summary", meta.get("title", "table"))
-                if summary not in table_summaries[source]:
-                    table_summaries[source].append(summary)
-            
             if source not in seen_sources:
                 seen_sources[source] = {
                     "source": source,
@@ -154,6 +154,13 @@ class QAEngine:
                     "doc_type": doc_type,
                     "company": meta.get("company")
                 }
+                
+        # Fetch tables ingested into DuckDB to append to the catalog for the planner
+        res_tables = self.db_manager.con.execute("SELECT DISTINCT source_pdf FROM _table_catalog").fetchall()
+        for row in res_tables:
+            src = row[0]
+            if src in seen_sources:
+                seen_sources[src]["has_tables"] = True
         
         catalog = list(seen_sources.values())
         
@@ -164,11 +171,9 @@ class QAEngine:
             y = entry['year'] or 'N/A'
             line = f"{i}. {entry['source']} — {entry['title']} | {q} {y} | Type: {entry['doc_type']}"
             
-            # Add table summaries if this source has associated tables
-            source = entry['source']
-            if source in table_summaries:
-                tables_desc = "; ".join(table_summaries[source][:5])  # Show up to 5
-                line += f"\n   📊 Tables: {tables_desc}"
+            # Indicate tables are available
+            if entry.get("has_tables", False):
+                line += f"\n   📊 Contains queryable tabular data in SQL Database."
             
             lines.append(line)
         
@@ -365,6 +370,7 @@ Use the provided context to answer the user's question about Equinor.
 If the answer is not in the context, say you don't know.
 Cite the sources (Source 1, Source 2, etc.) when stating facts.
 Provide a comprehensive, well-structured answer. Use bullet points or sections for clarity when appropriate.
+If the context contains a SQL Analytics Result from DuckDB, heavily prioritize that analytical data to form your exact numerical answer.
 If there is previous conversation history, use it to provide more contextual and relevant answers."""
 
         user_prompt = ""
@@ -372,6 +378,14 @@ If there is previous conversation history, use it to provide more contextual and
         if use_mem and self.memory and self.memory.messages:
             user_prompt += self.memory.get_formatted_history()
             user_prompt += "---\n\n"
+            
+        # Optional: Query DuckDB Text-to-SQL logic if tables are available for selected sources
+        source_names = [s['source'] for s in plan.get("sources", [])]
+        sql_context = self.sql_agent.query(question, source_names)
+        
+        if sql_context:
+            print("  ✅ Received analytical result from DuckDB Agent to fuse into synthesis!")
+            context_text = f"**{sql_context}**\n\n---\n\n" + context_text
         
         user_prompt += f"""Research plan reasoning: {reasoning}
 

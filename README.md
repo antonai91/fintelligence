@@ -1,6 +1,6 @@
-# Equinor Investor Relations Scraper
+# Equinor Investor Relations Explorer
 
-A Python-based scraper using Playwright to download financial reports from Equinor's investor relations page.
+A Python-based e-reader and analytical QA engine for processing financial reports from Equinor's investor relations.
 
 ## Setup
 
@@ -10,13 +10,11 @@ A Python-based scraper using Playwright to download financial reports from Equin
 uv sync
 ```
 
-1. Install Playwright browsers:
+1. Install dependencies:
 
 ```bash
-uv run playwright install chromium
+uv sync
 ```
-
-1. Configure environment variables:
 
 ```bash
 # Copy the example file
@@ -47,79 +45,41 @@ ollama run llava-phi3
 
 1. Configure: In `src/investor_relations_scraper/config.py`, ensure `PDF_EXTRACTION_METHOD` is set to `"ollama-vision"`.
 
-> **Note**: Ensure the Ollama app is running (check your menu bar) or run `ollama serve` in a separate terminal before starting the scraper.
+> **Note**: Ensure the Ollama app is running (check your menu bar) or run `ollama serve` in a separate terminal before starting extraction.
 
 ## Usage
 
-### Basic Usage
+### Interactive Gradio UI (Recommended)
 
-Download all available PDFs:
-
-```bash
-uv run python examples/basic_scraper.py
-# OR
-uv run ir-scraper
-```
-
-### Filter by Year
-
-Download only 2025 reports:
+The interactive way to explore and extract data is via the Gradio E-Reader Frontend:
 
 ```bash
-uv run ir-scraper --year 2025
+uv run python app.py
 ```
 
-Download only 2024 reports:
+This provides a three-column layout where you can:
 
-```bash
-uv run ir-scraper --year 2024
-```
-
-### Custom Download Directory
-
-Specify a custom download directory:
-
-```bash
-uv run ir-scraper --dir my_downloads
-```
-
-### Show Browser Window
-
-Run with visible browser (useful for debugging):
-
-```bash
-uv run ir-scraper --no-headless
-```
-
-### Combined Options
-
-```bash
-uv run ir-scraper --year 2025 --dir reports_2025 --no-headless
-```
+- Browse PDF pages alongside extracted text and tables.
+- Interactively extract tables from specific pages using local vision models.
+- **Edit and Save Tables**: Modifying and saving a table in the UI completely overwrites the existing table for that page and immediately syncs the changes to the underlying DuckDB database, providing instant updates for the QA chat.
+- Ask questions to the agentic QA chat interface.
+- Add and persist page-specific notes.
 
 ## Features
 
-- **Automated PDF Downloads**: Automatically finds and downloads all financial report PDFs
-- **Year Filtering**: Filter reports by specific year
-- **Multiple Extraction Methods**: Uses multiple strategies to find PDFs on the page
-- **Fallback OCR**: Automatically uses Qwen2.5-VL OCR for scanned/image-based PDF pages
-- **Error Handling**: Robust error handling with fallback download methods
-- **Progress Tracking**: Shows download progress and status
-- **Headless Mode**: Can run invisibly in the background or with visible browser
-- **Agentic QA**: Plan → Retrieve → Synthesize pipeline for answering financial questions
-
-## Output
-
-Downloaded PDFs are saved to the `downloads/` directory (or custom directory specified with `--dir`) with descriptive filenames based on the report titles.
+- **Interactive E-Reader**: Gradio-based web UI for reading, interactive extracting, and QA chat
+- **Agentic QA**: Plan → Retrieve → Synthesize pipeline for answering financial questions with both text and embedded CSV tables
+- **Error Handling**: Robust error handling
+- **Progress Tracking**: Shows processing tracking and status
 
 ## Project Structure
 
 ```text
 investor_relations_scraper/
+├── app.py                         # Gradio interactive E-Reader UI
 ├── src/
 │   └── investor_relations_scraper/
 │       ├── config.py              # Central configuration
-│       ├── scraper.py             # Playwright scraper
 │       ├── cli.py                 # PDF extractor CLI
 │       ├── document_loader.py     # Document loading & chunking
 │       ├── search.py              # FAISS vector store & hybrid search
@@ -128,7 +88,7 @@ investor_relations_scraper/
 │       └── extractors/            # PDF extraction strategies
 │           ├── base.py            # Abstract base classes
 │           ├── metadata_extractors.py
-│           └── pdf_extractors.py  # PdfPlumber, Qwen2.5-VL, Fallback
+│           └── pdf_extractors.py  # PdfPlumber and Ollama local vision
 ├── examples/                      # Example usage scripts
 ├── tests/                         # Test suite
 ├── data/                          # Data directory
@@ -140,7 +100,6 @@ investor_relations_scraper/
 ## Requirements
 
 - Python >= 3.9
-- Playwright
 - aiohttp
 - OpenAI API key (for extractor)
 
@@ -148,15 +107,16 @@ All dependencies are managed via the `pyproject.toml` file.
 
 ## PDF Extractor
 
-The extractor processes downloaded PDFs and uses OpenAI to clean and structure the data. Three extraction methods are available (set in `config.py`):
+The extractor processes downloaded PDFs and uses OpenAI to clean and structure the data. Two extraction methods are available (set in `config.py`):
 
 | Method | `PDF_EXTRACTION_METHOD` | Description |
 | --- | --- | --- |
 | **pdfplumber** | `"pdfplumber"` | Fast, text-based extraction |
 | **Ollama Vision** | `"ollama-vision"` | Local OCR via `llava-phi3` (Requires Ollama) |
-| **Fallback** (default) | `"fallback"` | pdfplumber first, OCR per-page when needed |
 
 ### Extractor Usage
+
+By default, the extractor CLI processes both text and tables.
 
 Process a single PDF:
 
@@ -168,6 +128,12 @@ Process all PDFs in `data/raw`:
 
 ```bash
 uv run ir-extractor
+```
+
+Skip table extraction for faster processing:
+
+```bash
+uv run ir-extractor --skip-tables
 ```
 
 ### Extractor Output
