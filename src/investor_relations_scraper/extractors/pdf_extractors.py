@@ -75,22 +75,24 @@ class PdfPlumberExtractor(BasePDFExtractor):
         return "pdfplumber"
 
 
-class OllamaVisionExtractor(BasePDFExtractor):
+class GPT4VisionExtractor(BasePDFExtractor):
     """
-    Extract tables from PDFs using a local Ollama vision model.
+    Extract tables from PDFs using GPT-4o-mini vision via the OpenAI API.
 
-    Renders each PDF page as an image and prompts Ollama (e.g., llava-phi3) 
-    to extract all tables as properly formatted CSV.
-    Text extraction still uses pdfplumber (fast and accurate for digital PDFs).
+    Renders each PDF page as an image and prompts GPT-4o-mini to extract all
+    tables as properly formatted CSV. Text extraction still uses pdfplumber
+    (fast and accurate for digital PDFs). Uses a pdfplumber pre-filter to
+    skip pages without structural tables before sending to the API.
     """
 
-    def __init__(self, api_key: Optional[str] = "ollama", model: str = "llava-phi3"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini"):
         """
         Args:
-            api_key: Dummy key for OpenAI client
-            model: Ollama model to use for vision
+            api_key: OpenAI API key (defaults to config.OPENAI_API_KEY)
+            model: OpenAI vision model to use (default: gpt-4o-mini)
         """
-        self._api_key = api_key
+        from .. import config
+        self._api_key = api_key or config.OPENAI_API_KEY
         self.model = model
         self._client = None
         self._pdfplumber = PdfPlumberExtractor()
@@ -100,16 +102,28 @@ class OllamaVisionExtractor(BasePDFExtractor):
         """Lazy OpenAI client initialization."""
         if self._client is None:
             from openai import OpenAI
-            from .. import config  # config is in parent package, not extractors/
-            self._client = OpenAI(
-                base_url=getattr(config, "OLLAMA_API_BASE", "http://localhost:11434/v1"),
-                api_key=self._api_key or "ollama"
-            )
+            self._client = OpenAI(api_key=self._api_key)
         return self._client
+
+    def _get_pages_with_tables(self, pdf_path: Path) -> set:
+        """
+        Fast heuristic pass: use pdfplumber to identify pages containing
+        structural tables. Only those pages are sent to the vision model.
+        """
+        suspect_pages = set()
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page_num, page in enumerate(pdf.pages, 1):
+                    if page.extract_tables():
+                        suspect_pages.add(page_num)
+            return suspect_pages
+        except Exception as e:
+            print(f"  ⚠ Pre-filter failed for {pdf_path.name}: {e}. Defaulting to all pages.")
+            return set()
 
     def _pdf_pages_to_images(self, pdf_path: Path) -> List[Tuple[int, str]]:
         """
-        Convert PDF pages to base64-encoded PNG images.
+        Convert PDF pages to base64-encoded PNG data URIs.
 
         Returns:
             List of (page_num, base64_data_uri) tuples
@@ -134,7 +148,7 @@ class OllamaVisionExtractor(BasePDFExtractor):
             return []
 
     def _extract_tables_from_image(self, data_uri: str, page_num: int) -> List[pd.DataFrame]:
-        """Send a page image to Ollama and parse any tables as DataFrames."""
+        """Send a single page image to GPT-4o-mini and parse returned tables as DataFrames."""
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -180,8 +194,7 @@ class OllamaVisionExtractor(BasePDFExtractor):
                     if not df.empty:
                         tables.append(df)
                 except Exception:
-                    # Try salvaging by stripping bad lines
-                    lines = [l for l in block.splitlines() if l.strip()]
+                    lines = [ln for ln in block.splitlines() if ln.strip()]
                     if len(lines) >= 2:
                         try:
                             df = pd.read_csv(StringIO("\n".join(lines)))
@@ -199,43 +212,37 @@ class OllamaVisionExtractor(BasePDFExtractor):
         """Use pdfplumber for text (fast, accurate for digital PDFs)."""
         return self._pdfplumber.extract_text(pdf_path)
 
-    def extract_tables(self, pdf_path: Path, max_workers: Optional[int] = None) -> List[Tuple[int, pd.DataFrame]]:
+    def extract_tables(self, pdf_path: Path) -> List[Tuple[int, pd.DataFrame]]:
         """
-        Extract tables using Ollama vision — processes all pages in parallel.
-
-        Args:
-            pdf_path: Path to PDF
-            max_workers: Max concurrent API calls (default from config)
+        Extract tables from all pages using GPT-4o-mini vision.
+        Uses pdfplumber pre-filter to skip pages with no structural tables.
         """
-        from .. import config
-        max_workers = max_workers or getattr(config, "OLLAMA_VISION_MAX_WORKERS", 30)
-
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         images = self._pdf_pages_to_images(pdf_path)
         if not images:
             return []
 
-        print(f"  Extracting tables from {len(images)} pages with Ollama vision (parallel, {max_workers} workers)...")
+        print("  🔍 Running fast table heuristic pre-filter...")
+        suspect_pages = self._get_pages_with_tables(pdf_path)
+
+        if not suspect_pages:
+            print("  ⏩ No structural tables detected in PDF. Skipping vision pass.")
+            return []
+
+        filtered_images = [(p, uri) for p, uri in images if p in suspect_pages]
+        if not filtered_images:
+            filtered_images = images
+
+        print(f"  🎯 Filtered to {len(filtered_images)} pages (out of {len(images)} total).")
+        print(f"  🧠 Extracting tables with {self.model} vision...")
+
         all_tables: List[Tuple[int, pd.DataFrame]] = []
+        for page_num, data_uri in filtered_images:
+            page_tables = self._extract_tables_from_image(data_uri, page_num)
+            if page_tables:
+                print(f"  ✓ Page {page_num}: found {len(page_tables)} table(s)")
+                for df in page_tables:
+                    all_tables.append((page_num, df))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_page = {
-                executor.submit(self._extract_tables_from_image, data_uri, page_num): page_num
-                for page_num, data_uri in images
-            }
-            for future in as_completed(future_to_page):
-                page_num = future_to_page[future]
-                try:
-                    page_tables = future.result()
-                    if page_tables:
-                        print(f"  ✓ Page {page_num}: found {len(page_tables)} table(s)")
-                        for df in page_tables:
-                            all_tables.append((page_num, df))
-                except Exception as e:
-                    print(f"  ✗ Page {page_num} failed: {e}")
-
-        # Sort by page number for consistent ordering
         all_tables.sort(key=lambda t: t[0])
         print(f"  📊 Total tables extracted: {len(all_tables)}")
         return all_tables
@@ -244,4 +251,4 @@ class OllamaVisionExtractor(BasePDFExtractor):
         return True
 
     def get_name(self) -> str:
-        return f"Ollama Vision ({self.model})"
+        return f"GPT-4o Vision ({self.model})"

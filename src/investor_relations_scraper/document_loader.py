@@ -175,46 +175,57 @@ JSON:"""
         return documents
     
     def _process_file(self, file_path: Path) -> List[Dict[str, Any]]:
-        """Process a single text file into chunks with metadata"""
-        # Read the processed text
+        """Process a single text file into chunks with metadata, preserving page numbers."""
         text = file_path.read_text(encoding='utf-8')
-        
-        # Extract metadata using LLM (analyzes content, not just filename)
+
         print(f"  Extracting metadata with LLM...")
         file_metadata = self._extract_metadata_with_llm(text, file_path.name)
         print(f"  -> {file_metadata.get('title')} | {file_metadata.get('quarter')} {file_metadata.get('year')} | {file_metadata.get('doc_type')}")
-        
+
+        # Split text on page markers written by PdfPlumberExtractor:
+        # "--- Page N ---\n..." or "--- PAGE N ---\n..."
+        page_marker_re = re.compile(r'---\s*[Pp]age\s+(\d+)\s*---', re.IGNORECASE)
+        page_sections: List[Tuple[int, str]] = []  # (page_num, text)
+
+        parts = page_marker_re.split(text)
+        if len(parts) > 1:
+            # parts = [pre_text, page_num, page_text, page_num, page_text, ...]
+            for i in range(1, len(parts), 2):
+                page_num = int(parts[i])
+                page_text = parts[i + 1].strip() if i + 1 < len(parts) else ""
+                if page_text:
+                    page_sections.append((page_num, page_text))
+        else:
+            # No page markers — treat entire text as page 1
+            page_sections = [(1, text.strip())]
+
         chunks = []
-        
-        # Simple word-based chunking
-        words = text.split()
-        
         chunk_id = 0
-        for i in range(0, len(words), self.chunk_size - self.overlap):
-            chunk_words = words[i:i + self.chunk_size]
-            chunk_text = " ".join(chunk_words)
-            
-            # Skip very small chunks
-            if len(chunk_words) < 50:
-                continue
-            
-            # Create chunk with rich metadata (including company from LLM)
-            chunks.append({
-                "text": chunk_text,
-                "metadata": {
-                    "source": file_path.name.replace('_text.txt', '.pdf'),  # Original PDF name
-                    "title": file_metadata["title"],
-                    "doc_type": file_metadata["doc_type"],
-                    "quarter": file_metadata["quarter"],
-                    "year": file_metadata["year"],
-                    "company": file_metadata.get("company"),
-                    "path": str(file_path),
-                    "chunk_id": chunk_id
-                }
-            })
-            chunk_id += 1
-            
+        for page_num, page_text in page_sections:
+            words = page_text.split()
+            for i in range(0, len(words), self.chunk_size - self.overlap):
+                chunk_words = words[i:i + self.chunk_size]
+                chunk_text = " ".join(chunk_words)
+                if len(chunk_words) < 50:
+                    continue
+                chunks.append({
+                    "text": chunk_text,
+                    "metadata": {
+                        "source": file_path.name.replace('_text.txt', '.pdf'),
+                        "title": file_metadata["title"],
+                        "doc_type": file_metadata["doc_type"],
+                        "quarter": file_metadata["quarter"],
+                        "year": file_metadata["year"],
+                        "company": file_metadata.get("company"),
+                        "path": str(file_path),
+                        "chunk_id": chunk_id,
+                        "page": page_num,
+                    }
+                })
+                chunk_id += 1
+
         return chunks
+
     
     @staticmethod
     def get_file_hash(file_path: str) -> str:

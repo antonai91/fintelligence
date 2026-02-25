@@ -52,27 +52,17 @@ MODEL_DEVICE = None
 # Extraction Strategy Configuration
 # ============================================================================
 
-# PDF extraction method
-# Options: "pdfplumber" (fast, text-based), "ollama-vision" (local Ollama vision model)
-PDF_EXTRACTION_METHOD = "ollama-vision"
-
 # Metadata extraction method
 # Options: "llm" (intelligent, uses OpenAI), "regex" (fast, filename-based), "hybrid" (tries LLM, falls back to regex)
 METADATA_EXTRACTION_METHOD = "hybrid"
 
 # ============================================================================
-# Ollama Vision Table Extraction Configuration
+# Vision Table Extraction Configuration (on-demand from UI)
 # ============================================================================
 
-# Model for vision-based table extraction from PDF page images
-# Uses Ollama API (OpenAI compatible) for local table understanding
-MODEL_TABLE_EXTRACTOR = "llava-phi3"
-OLLAMA_API_BASE = "http://localhost:11434/v1"
-
-# Number of concurrent Ollama vision requests per PDF
-# IMPORTANT: Start Ollama with `OLLAMA_NUM_PARALLEL=4 ollama serve` (or higher) 
-# to actually utilize parallel processing and maximize Mac CPU/GPU usage.
-OLLAMA_VISION_MAX_WORKERS = 10
+# Model for vision-based table extraction from PDF page images via the OpenAI API
+# Tables are only extracted on demand from the Gradio UI, never in batch.
+MODEL_TABLE_EXTRACTOR = "gpt-4o-mini"
 # ============================================================================
 # Directory Configuration
 # ============================================================================
@@ -185,12 +175,12 @@ def print_config():
     print(f"Extractor Model: {MODEL_EXTRACTOR}")
     print(f"Q&A Model: {MODEL_QA}")
     print(f"Metadata Model: {MODEL_METADATA}")
+    print(f"Table Extractor Model: {MODEL_TABLE_EXTRACTOR}")
     print(f"Embedding Model: {MODEL_EMBEDDING}")
     print(f"Temperature: {TEMPERATURE}")
     print(f"Max Text Chars: {MAX_TEXT_CHARS:,}")
     print(f"Top K Documents: {TOP_K_DOCUMENTS}")
     print(f"Max Concurrent PDFs: {MAX_CONCURRENT_PDFS}")
-    print(f"Ollama Vision Max Workers: {OLLAMA_VISION_MAX_WORKERS}")
     print(f"Raw Directory: {RAW_DIR}")
     print(f"Processed Directory: {PROCESSED_DIR}")
     print("=" * 60)

@@ -14,7 +14,7 @@ from .extractors import (
     RegexMetadataExtractor,
     HybridMetadataExtractor,
     PdfPlumberExtractor,
-    OllamaVisionExtractor,
+    GPT4VisionExtractor,
 )
 from .qa_engine import QAEngine
 from .document_loader import ProcessedDocumentLoader
@@ -29,7 +29,7 @@ __all__ = [
     "RegexMetadataExtractor",
     "HybridMetadataExtractor",
     "PdfPlumberExtractor",
-    "OllamaVisionExtractor",
+    "GPT4VisionExtractor",
     "QAEngine",
     "ProcessedDocumentLoader",
     "PersistentVectorStore",

@@ -19,6 +19,28 @@ from .conversation_memory import ConversationMemory
 from .table_db import DuckDBManager, TableQAAgent
 
 
+
+def _build_source_refs(results: list) -> list:
+    """
+    Deduplicate retrieved chunks into a list of {pdf, page, title} dicts,
+    ordered by document then page number, for the source navigation panel.
+    """
+    seen = set()
+    refs = []
+    for res in results:
+        meta = res.get("document", {}).get("metadata", {})
+        source = meta.get("source", "")
+        page = meta.get("page")
+        title = meta.get("title", source)
+        key = (source, page)
+        if key not in seen:
+            seen.add(key)
+            refs.append({"pdf": source, "page": page, "title": title})
+    # Sort by source then page
+    refs.sort(key=lambda r: (r["pdf"], r["page"] or 0))
+    return refs
+
+
 class QAEngine:
     """Main interface for Question Answering"""
     
@@ -155,8 +177,9 @@ class QAEngine:
                     "company": meta.get("company")
                 }
                 
-        # Fetch tables ingested into DuckDB to append to the catalog for the planner
-        res_tables = self.db_manager.con.execute("SELECT DISTINCT source_pdf FROM _table_catalog").fetchall()
+        # Fetch tables ingested into DuckDB to annotate catalog with has_tables flag
+        with self.db_manager._connect() as con:
+            res_tables = con.execute("SELECT DISTINCT source_pdf FROM _table_catalog").fetchall()
         for row in res_tables:
             src = row[0]
             if src in seen_sources:
@@ -418,6 +441,7 @@ Answer:"""
             return {
                 "answer": answer,
                 "sources": sources,
+                "source_refs": _build_source_refs(results),
                 "plan": plan,
                 "retrieved_chunks": results
             }
@@ -431,6 +455,7 @@ Answer:"""
             return {
                 "answer": error_msg,
                 "sources": sources,
+                "source_refs": [],
                 "plan": plan
             }
     
