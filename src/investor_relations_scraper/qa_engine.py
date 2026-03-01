@@ -192,7 +192,8 @@ class QAEngine:
         for i, entry in enumerate(catalog, 1):
             q = entry['quarter'] or 'N/A'
             y = entry['year'] or 'N/A'
-            line = f"{i}. {entry['source']} — {entry['title']} | {q} {y} | Type: {entry['doc_type']}"
+            c = entry.get('company', 'Unknown')
+            line = f"{i}. {entry['source']} — {entry['title']} | {q} {y} | Type: {entry['doc_type']} | Company: {c}"
             
             # Indicate tables are available
             if entry.get("has_tables", False):
@@ -381,12 +382,15 @@ Return ONLY the JSON object, no markdown formatting:"""
             source_name = doc["metadata"]["source"]
             quarter = doc["metadata"].get("quarter", "")
             year = doc["metadata"].get("year", "")
+            company = doc["metadata"].get("company", "Unknown")
             # Guard against list values from LLM metadata extraction
             if isinstance(quarter, list):
                 quarter = quarter[0] if quarter else ""
             if isinstance(year, list):
                 year = year[0] if year else ""
-            context_text += f"Source {i+1} ({source_name} — {quarter} {year}):\n{doc['text']}\n\n"
+            if isinstance(company, list):
+                company = company[0] if company else "Unknown"
+            context_text += f"Source {i+1} ({source_name} — {company}, {quarter} {year}):\n{doc['text']}\n\n"
             
             if source_name not in sources:
                 sources.append(source_name)
@@ -394,7 +398,7 @@ Return ONLY the JSON object, no markdown formatting:"""
         reasoning = plan.get("reasoning", "")
         
         system_prompt = """You are a helpful financial analyst assistant.
-Use the provided context to answer the user's question about Equinor.
+Use the provided context to answer the user's question about the relevant company or companies.
 If the answer is not in the context, say you don't know.
 Cite the sources (Source 1, Source 2, etc.) when stating facts.
 Provide a comprehensive, well-structured answer. Use bullet points or sections for clarity when appropriate.

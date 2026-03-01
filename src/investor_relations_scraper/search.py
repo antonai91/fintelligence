@@ -173,7 +173,7 @@ class HybridSearchEngine:
         Search document metadata (title, quarter, year, doc_type)
         Returns dict of document index -> relevance score
         """
-        query_lower = query.lower()
+        query_lower = str(query).lower()
         metadata_scores = {}
         
         for i, doc in enumerate(self.documents):

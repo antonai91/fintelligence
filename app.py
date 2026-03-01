@@ -7,9 +7,11 @@ Layout:
   Below  → Extracted tables accordion
 """
 
+import asyncio
 import base64
 import re
 import sys
+import shutil
 import traceback
 import json
 from io import BytesIO, StringIO
@@ -152,6 +154,40 @@ def on_prev_page(page_num, pdf_name):
 def on_next_page(page_num, pdf_name):
     return on_page_change(min(doc_state.total_pages or 1, int(page_num) + 1), pdf_name)
 
+async def on_upload_pdf(file_obj):
+    if not file_obj:
+        return gr.update(), "⚠ No file uploaded", gr.update()
+    
+    try:
+        from investor_relations_scraper.cli import PDFExtractor
+        
+        # Save uploaded file
+        original_name = Path(file_obj.name).name
+        dest_path = RAW_DIR / original_name
+        shutil.copy(file_obj.name, dest_path)
+        
+        print(f"📥 Received file: {original_name}")
+        
+        # Extract and clean text using existing robust extractor
+        extractor = PDFExtractor()
+        results = await extractor.process_pdf(dest_path, skip_text=False, clean=True)
+        
+        if results.get("errors"):
+            return gr.update(), f"❌ Extraction error: {', '.join(results['errors'])}", gr.update()
+            
+        print("indexing new document...")
+        if _qa_engine:
+            _qa_engine.load_and_index(force_reindex=False) 
+            
+        # Refresh the dropdown with the new list and select the new file
+        new_choices = get_pdf_list()
+        
+        return gr.Dropdown(choices=new_choices, value=original_name), f"✅ Uploaded and indexed {original_name}!", _build_page_outputs(original_name, 1)
+
+    except Exception as e:
+        traceback.print_exc()
+        return gr.update(), f"❌ Upload error: {str(e)}", gr.update()
+
 # ---------------------------------------------------------------------------
 # Table extraction
 # ---------------------------------------------------------------------------
@@ -190,7 +226,7 @@ def _gpt_extract(client, model: str, data_uri: str, page_num: int) -> List[pd.Da
                     "1. DO NOT calculate, guess, or hallucinate numbers. Copy EXACTLY what you see.\n"
                     "2. If a cell is blank in the image, strictly output an empty string `\"\"`.\n"
                     "3. If a cell contains a dash `-`, output a dash `\"-\"`.\n"
-                    "4. Preserve all numbers exactly with commas (e.g., if it says 10,620, output \"10,620\").\n"
+                    "4. STRIP ALL COMMAS from numbers (e.g., if it says 10,620, output \"10620\").\n"
                     "5. Convert parenthesised negatives: (75) MUST become \"-75\".\n"
                     "6. Remove footnote markers (* ** 1 2 etc.).\n"
                     "7. Use exact column headers. Flatten multi-level headers with spaces.\n"
@@ -201,8 +237,8 @@ def _gpt_extract(client, model: str, data_uri: str, page_num: int) -> List[pd.Da
                     "  {\n"
                     "    \"headers\": [\"Indicator\", \"1Q25\", \"1Q24\"],\n"
                     "    \"rows\": [\n"
-                    "      [\"Earnings\", \"10,620\", \"9,800\"],\n"
-                    "      [\"Taxes\", \"-3,226\", \"-3,849\"]\n"
+                    "      [\"Earnings\", \"10620\", \"9800\"],\n"
+                    "      [\"Taxes\", \"-3226\", \"-3849\"]\n"
                     "    ]\n"
                     "  }\n"
                     "]\n\n"
@@ -245,11 +281,12 @@ def _gpt_verify(client, model: str, data_uri: str, tables: List[pd.DataFrame], p
                     "RULES FOR CORRECTION:\n"
                     "1. EVERY number must EXACTLY match the image. Do not calculate missing totals.\n"
                     "2. Fix wrong column placements and misaligned rows.\n"
-                    "3. (100) must be \"-100\".\n"
-                    "4. Empty cells must be empty strings `\"\"`.\n"
-                    "5. Output the corrected JSON only (using same array of dicts format).\n"
-                    "6. You MUST return exactly the same number of tables.\n"
-                    "7. Return ONLY raw JSON code, no markdown fences or preambles."
+                    "3. STRIP ALL COMMAS from numbers (e.g., if image says 10,620, output \"10620\").\n"
+                    "4. (100) must be \"-100\".\n"
+                    "5. Empty cells must be empty strings `\"\"`.\n"
+                    "6. Output the corrected JSON only (using same array of dicts format).\n"
+                    "7. You MUST return exactly the same number of tables.\n"
+                    "8. Return ONLY raw JSON code, no markdown fences or preambles."
                 )}
             ]}],
             max_tokens=4096, temperature=0.0,
@@ -356,14 +393,15 @@ def on_save_extracted_table(df: pd.DataFrame, pdf_name: str, page_num: int,
     try:
         base = Path(pdf_name).stem
         pn = int(page_num)
-        csv_file = PROCESSED_DIR / f"{base}_table_p{pn}_{idx+1}.csv"
-        df.to_csv(csv_file, index=False)
+        
+        # Calculate next table counter by checking how many are already saved for this page
         doc_state.table_map.setdefault(pn, [])
-        slot = idx
-        if slot < len(doc_state.table_map[pn]):
-            doc_state.table_map[pn][slot] = df
-        else:
-            doc_state.table_map[pn].append(df)
+        table_num = len(doc_state.table_map[pn]) + 1
+        
+        csv_file = PROCESSED_DIR / f"{base}_table_p{pn}_{table_num}.csv"
+        df.to_csv(csv_file, index=False)
+        doc_state.table_map[pn].append(df)
+        
         if _qa_engine and hasattr(_qa_engine, 'db_manager'):
             _qa_engine.db_manager.reload_csv(csv_file.name)
         msg = f"✅ Saved {csv_file.name}! "
@@ -399,7 +437,13 @@ def on_chat_respond(history: list, refs_state: list):
     if isinstance(last, dict):
         if last.get("role") != "user":
             return history, refs_state, gr.Accordion(open=False)
-        user_message = last["content"]
+        content = last.get("content", "")
+        if isinstance(content, list):
+            # Gradio multimodal messages format: [{"type": "text", "text": "blah"}]
+            texts = [c["text"] for c in content if isinstance(c, dict) and c.get("type") == "text"]
+            user_message = " ".join(texts) if texts else str(content)
+        else:
+            user_message = str(content)
     else:
         user_message = str(last[0]) if last else ""
     print(f"💬 Q: {user_message}")
@@ -608,13 +652,13 @@ label > span, .form > label {
 # ---------------------------------------------------------------------------
 
 with gr.Blocks(
-    title="Equinor IR Explorer",
+    title="Financial Document Explorer",
 ) as demo:
 
     # ── Sticky topbar ──
     gr.HTML("""
     <div id="topbar">
-        <div id="topbar-brand">📊 Equinor <span>IR</span> Explorer</div>
+        <div id="topbar-brand">📊 Financial Document <span>Explorer</span></div>
     </div>
     """)
 
@@ -628,6 +672,7 @@ with gr.Blocks(
         pdf_dropdown = gr.Dropdown(
             choices=get_pdf_list(), label="Document", scale=4,
         )
+        upload_btn = gr.UploadButton("Upload PDF", file_types=[".pdf"], file_count="single", size="sm", scale=1, min_width=100)
         prev_btn = gr.Button("◀", scale=0, min_width=44)
         page_slider = gr.Slider(minimum=1, maximum=1, step=1, value=1, label="Page", scale=3)
         next_btn = gr.Button("▶", scale=0, min_width=44)
@@ -711,8 +756,8 @@ with gr.Blocks(
                 examples=[
                     "What was the adjusted operating income for Q4 2024?",
                     "Summarize the production highlights from Q3 2025.",
-                    "Compare European gas prices across all quarters of 2025.",
-                    "What is Equinor's capital distribution guidance?",
+                    "Compare total revenues across all quarters of 2025.",
+                    "What is the company's capital distribution guidance?",
                 ],
                 inputs=chat_input, label="Examples",
             )
@@ -725,6 +770,23 @@ with gr.Blocks(
     page_slider.release(fn=on_page_change,   inputs=[page_slider, pdf_dropdown], outputs=shared_outputs)
     prev_btn.click(     fn=on_prev_page,      inputs=[page_slider, pdf_dropdown], outputs=shared_outputs)
     next_btn.click(     fn=on_next_page,      inputs=[page_slider, pdf_dropdown], outputs=shared_outputs)
+
+    # ── Wiring: Upload ──
+    async def upload_wrapper(curr_file):
+        dd_update, status_msg, page_outputs = await on_upload_pdf(curr_file)
+        # Returns [pdf_dropdown, status_box, page_slider, page_image, extracted_table, table_group, status1, dl_btn]
+        # (status box gets the success/error message; status1 is the inner page status)
+        if isinstance(page_outputs, tuple):
+             return (dd_update, status_msg) + page_outputs
+        return tuple([dd_update, status_msg] + [gr.update()] * 6)
+
+    upload_btn.upload(
+        fn=lambda: "⏳ Uploading, extracting and indexing Document...", outputs=[status_box]
+    ).then(
+        fn=upload_wrapper,
+        inputs=[upload_btn],
+        outputs=[pdf_dropdown, status_box] + shared_outputs
+    )
 
     # ── Wiring: Table Extraction ──
 
