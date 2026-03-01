@@ -381,6 +381,11 @@ Return ONLY the JSON object, no markdown formatting:"""
             source_name = doc["metadata"]["source"]
             quarter = doc["metadata"].get("quarter", "")
             year = doc["metadata"].get("year", "")
+            # Guard against list values from LLM metadata extraction
+            if isinstance(quarter, list):
+                quarter = quarter[0] if quarter else ""
+            if isinstance(year, list):
+                year = year[0] if year else ""
             context_text += f"Source {i+1} ({source_name} — {quarter} {year}):\n{doc['text']}\n\n"
             
             if source_name not in sources:

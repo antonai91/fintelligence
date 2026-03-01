@@ -183,24 +183,35 @@ class HybridSearchEngine:
             # Check quarter match (e.g., "Q4", "Q1")
             if metadata.get("quarter"):
                 quarter = metadata["quarter"]
-                if quarter.lower() in query_lower:
+                # Handle case where LLM returned a list instead of a string
+                if isinstance(quarter, list):
+                    quarter = quarter[0] if quarter else ""
+                if isinstance(quarter, str) and quarter.lower() in query_lower:
                     score += 0.4
             
             # Check year match (e.g., "2025", "2024")
             if metadata.get("year"):
                 year = metadata["year"]
+                if isinstance(year, list):
+                    year = year[0] if year else ""
+                year = str(year)
                 if year in query_lower:
                     score += 0.3
             
             # Check doc type match (e.g., "report", "transcript")
             if metadata.get("doc_type"):
                 doc_type = metadata["doc_type"]
-                if doc_type.lower() in query_lower:
+                if isinstance(doc_type, list):
+                    doc_type = doc_type[0] if doc_type else ""
+                if isinstance(doc_type, str) and doc_type.lower() in query_lower:
                     score += 0.2
             
             # Check title match
             if metadata.get("title"):
-                title = metadata["title"].lower()
+                title = metadata["title"]
+                if isinstance(title, list):
+                    title = title[0] if title else ""
+                title = str(title).lower()
                 # Count matching words
                 query_words = set(query_lower.split())
                 title_words = set(title.split())
