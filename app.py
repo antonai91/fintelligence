@@ -595,10 +595,10 @@ footer { display:none !important; }
 }
 #pdf-card .image-container { padding: 0 !important; }
 
-/* ── Section label pill ── */
+/* ── Section label pill (higher contrast) ── */
 .sec {
     font-size: 10px; font-weight: 700; letter-spacing: 0.9px;
-    text-transform: uppercase; color: var(--sub);
+    text-transform: uppercase; color: #424245;
     margin: 0 0 8px 2px;
 }
 
@@ -651,9 +651,19 @@ footer { display:none !important; }
     font-family: var(--font) !important; font-weight: 500 !important;
 }
 button[data-testid*="stop"], .gr-button-stop {
-    background: rgba(255,59,48,0.07) !important; color: var(--danger) !important;
-    border: none !important; border-radius: var(--radius-sm) !important;
-    font-family: var(--font) !important;
+    background: rgba(255,59,48,0.07) !important; color: #c93424 !important;
+    border: 1px solid rgba(255,59,48,0.25) !important; border-radius: var(--radius-sm) !important;
+    font-family: var(--font) !important; font-weight: 500 !important;
+}
+/* Secondary buttons (e.g. Clear): high-contrast text */
+#chat-panel .gr-button-secondary,
+#chat-panel button.gr-button-secondary {
+    color: #1d1d1f !important;
+    background: #e8e8ed !important;
+    border: 1px solid rgba(0,0,0,0.12) !important;
+}
+#chat-panel .gr-button-secondary:hover {
+    background: #d2d2d7 !important;
 }
 
 /* Narrow nav buttons */
@@ -681,12 +691,12 @@ label > span, .form > label {
     letter-spacing: 0.1px !important;
 }
 
-/* ── Invisible status box ── */
+/* ── Invisible status box (readable contrast) ── */
 #status-box > label { display: none !important; }
 #status-box textarea {
     background: transparent !important; border: none !important;
     box-shadow: none !important; resize: none !important;
-    font-size: 12px !important; color: var(--sub) !important;
+    font-size: 12px !important; color: #424245 !important;
     padding: 2px 0 !important; min-height: 0 !important;
 }
 
@@ -702,6 +712,65 @@ label > span, .form > label {
     border-radius: var(--radius-sm) !important;
     border-color: var(--border) !important;
     background: var(--card) !important;
+}
+/* Accordion headers and content: high-contrast text */
+#chat-panel .gr-accordion,
+#chat-panel .gr-accordion *,
+#chat-panel [data-testid="accordion"] * {
+    color: #1d1d1f !important;
+}
+#chat-panel .gr-accordion label,
+#chat-panel .gr-accordion span {
+    color: #1d1d1f !important;
+}
+
+/* Source References & Examples: dataset/sample text contrast */
+#chat-panel .gr-dataset,
+#chat-panel .gr-dataset *,
+#chat-panel [data-testid="dataset"] *,
+#chat-panel .sample {
+    color: #1d1d1f !important;
+}
+#chat-panel .gr-dataset .sample-item,
+#chat-panel .gr-dataset button {
+    color: #1d1d1f !important;
+    background: #f5f5f7 !important;
+    border: 1px solid rgba(0,0,0,0.1) !important;
+}
+
+/* Chat Sources line: make source names (backtick/code) clearly visible */
+#chat-panel code,
+#chat-panel .message code,
+#chat-panel .prose code,
+#chat-panel [data-testid="bot"] code,
+.gr-chatbot code,
+#chat-panel .message-wrap code,
+#chat-panel .gr-markdown code,
+#chat-panel [data-testid="chatbot"] code {
+    background: #e8e8ed !important;
+    color: #1d1d1f !important;
+    padding: 4px 8px !important;
+    border-radius: 6px !important;
+    font-size: 13px !important;
+    border: 1px solid rgba(0,0,0,0.1) !important;
+}
+/* Inline source links (if any) */
+#chat-panel .prose a,
+#chat-panel .message a,
+#chat-panel [data-testid="bot"] a {
+    color: #007aff !important;
+    font-weight: 500 !important;
+}
+
+/* Clear / secondary buttons in chat: visible text and border */
+#chat-panel button:not(.primary):not([variant="primary"]) {
+    color: #1d1d1f !important;
+    background: #e8e8ed !important;
+    border: 1px solid rgba(0,0,0,0.12) !important;
+}
+#chat-panel button:not(.primary):not([variant="primary"]):hover {
+    background: #d2d2d7 !important;
+    border-color: rgba(0,0,0,0.18) !important;
 }
 """
 
@@ -812,10 +881,10 @@ with gr.Blocks(
 
             gr.Examples(
                 examples=[
-                    "What was the adjusted operating income for Q4 2024?",
-                    "Summarize the production highlights from Q3 2025.",
-                    "Compare total revenues across all quarters of 2025.",
-                    "What is the company's capital distribution guidance?",
+                    "What was Equinor's adjusted operating income for Q4 2024?",
+                    "Summarize Equinor's production highlights from Q3 2025.",
+                    "Compare Equinor's total revenues across all quarters of 2025.",
+                    "What is Equinor's capital distribution guidance?",
                 ],
                 inputs=chat_input, label="Examples",
             )
