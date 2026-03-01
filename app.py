@@ -154,39 +154,97 @@ def on_prev_page(page_num, pdf_name):
 def on_next_page(page_num, pdf_name):
     return on_page_change(min(doc_state.total_pages or 1, int(page_num) + 1), pdf_name)
 
-async def on_upload_pdf(file_obj):
-    if not file_obj:
-        return gr.update(), "⚠ No file uploaded", gr.update()
-    
+def _no_page_updates():
+    """Return 6 gr.update() placeholders for shared_outputs when upload fails or has no document."""
+    return (gr.update(),) * 6
+
+
+def _resolve_upload_path(file_obj):
+    """Resolve Gradio upload value to a Path. Returns (Path|None, error_message|None)."""
+    if file_obj is None:
+        return None, "No file received (value is None)"
+    # Gradio 5 can pass: str path, bytes, list of str/bytes, or object with .name
+    if isinstance(file_obj, list):
+        if not file_obj:
+            return None, "No file received (empty list)"
+        file_obj = file_obj[0]
+    if isinstance(file_obj, (str, Path)):
+        p = Path(file_obj)
+    elif isinstance(file_obj, bytes):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(file_obj)
+            p = Path(f.name)
+    else:
+        name = getattr(file_obj, "name", None)
+        if name is None:
+            return None, f"Unknown file type: {type(file_obj).__name__}"
+        p = Path(name)
+    if not p.exists():
+        return None, f"File not found: {p}"
+    if not p.name.lower().endswith(".pdf"):
+        return None, "Please upload a PDF file."
+    return p, None
+
+
+async def _on_upload_pdf_async(file_obj):
+    """Async core: save to raw, process to processed, return (dropdown, status, page_outputs)."""
+    no_updates = _no_page_updates()
+    src_path, err = _resolve_upload_path(file_obj)
+    if err:
+        print(f"[Upload] {err}")
+        return gr.update(), f"⚠ {err}", no_updates
+
+    config.ensure_directories()
+    original_name = src_path.name
+
     try:
         from investor_relations_scraper.cli import PDFExtractor
-        
-        # Save uploaded file
-        original_name = Path(file_obj.name).name
-        dest_path = RAW_DIR / original_name
-        shutil.copy(file_obj.name, dest_path)
-        
-        print(f"📥 Received file: {original_name}")
-        
-        # Extract and clean text using existing robust extractor
-        extractor = PDFExtractor()
-        results = await extractor.process_pdf(dest_path, skip_text=False, clean=True)
-        
-        if results.get("errors"):
-            return gr.update(), f"❌ Extraction error: {', '.join(results['errors'])}", gr.update()
-            
-        print("indexing new document...")
-        if _qa_engine:
-            _qa_engine.load_and_index(force_reindex=False) 
-            
-        # Refresh the dropdown with the new list and select the new file
-        new_choices = get_pdf_list()
-        
-        return gr.Dropdown(choices=new_choices, value=original_name), f"✅ Uploaded and indexed {original_name}!", _build_page_outputs(original_name, 1)
 
+        # 1) Save to raw folder (data/raw/)
+        dest_path = RAW_DIR / original_name
+        shutil.copy(str(src_path), str(dest_path))
+        print(f"📥 Saved to raw: {dest_path}")
+
+        # 2) Process: extract text and write to processed folder (data/processed/)
+        extractor = PDFExtractor(raw_dir=str(RAW_DIR), processed_dir=str(PROCESSED_DIR))
+        results = await extractor.process_pdf(dest_path, skip_text=False, clean=True)
+
+        if results.get("errors"):
+            msg = f"❌ Extraction error: {', '.join(results['errors'])}"
+            print(f"[Upload] {msg}")
+            return gr.update(), msg, no_updates
+
+        print(f"📄 Processed: {results.get('text_file', '—')} in {PROCESSED_DIR}")
+
+        # 3) Index for QA and refresh document list
+        if _qa_engine:
+            _qa_engine.load_and_index(force_reindex=False)
+        doc_state.load(original_name)
+        new_choices = get_pdf_list()
+
+        return (
+            gr.Dropdown(choices=new_choices, value=original_name),
+            f"✅ Uploaded to raw, processed to {PROCESSED_DIR.name}/ — {original_name}",
+            _build_page_outputs(original_name, 1),
+        )
     except Exception as e:
         traceback.print_exc()
-        return gr.update(), f"❌ Upload error: {str(e)}", gr.update()
+        return gr.update(), f"❌ Upload error: {str(e)}", no_updates
+
+
+def on_upload_pdf(file_obj):
+    """Sync wrapper: run async upload. Use a thread so asyncio.run() works even if Gradio has a running loop."""
+    import concurrent.futures
+    print(f"[Upload] Handler called with type={type(file_obj).__name__!r}")
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _on_upload_pdf_async(file_obj))
+            return future.result()
+    except Exception as e:
+        print(f"[Upload] Wrapper error: {e}")
+        traceback.print_exc()
+        return gr.update(), f"❌ Error: {str(e)}", _no_page_updates()
 
 # ---------------------------------------------------------------------------
 # Table extraction
@@ -772,20 +830,17 @@ with gr.Blocks(
     next_btn.click(     fn=on_next_page,      inputs=[page_slider, pdf_dropdown], outputs=shared_outputs)
 
     # ── Wiring: Upload ──
-    async def upload_wrapper(curr_file):
-        dd_update, status_msg, page_outputs = await on_upload_pdf(curr_file)
-        # Returns [pdf_dropdown, status_box, page_slider, page_image, extracted_table, table_group, status1, dl_btn]
-        # (status box gets the success/error message; status1 is the inner page status)
-        if isinstance(page_outputs, tuple):
-             return (dd_update, status_msg) + page_outputs
-        return tuple([dd_update, status_msg] + [gr.update()] * 6)
+    # Single handler: Gradio passes the uploaded file as the only input; we return 8 outputs.
+    def upload_handler(curr_file):
+        dd_update, status_msg, page_outputs = on_upload_pdf(curr_file)
+        if isinstance(page_outputs, tuple) and len(page_outputs) == 6:
+            return (dd_update, status_msg) + page_outputs
+        return (dd_update, status_msg) + _no_page_updates()
 
     upload_btn.upload(
-        fn=lambda: "⏳ Uploading, extracting and indexing Document...", outputs=[status_box]
-    ).then(
-        fn=upload_wrapper,
+        fn=upload_handler,
         inputs=[upload_btn],
-        outputs=[pdf_dropdown, status_box] + shared_outputs
+        outputs=[pdf_dropdown, status_box] + shared_outputs,
     )
 
     # ── Wiring: Table Extraction ──
@@ -871,4 +926,6 @@ if __name__ == "__main__":
         neutral_hue=gr.themes.colors.gray,
         font=[gr.themes.GoogleFont("Inter"), "Helvetica Neue", "sans-serif"],
     )
+    # Queue required for long-running upload (extraction + indexing) so the request doesn't time out
+    demo.queue()
     demo.launch(server_name="0.0.0.0", server_port=7860, css=CSS, theme=my_theme)

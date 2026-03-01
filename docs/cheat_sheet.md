@@ -16,6 +16,8 @@ cp .env.example .env
 uv run python app.py
 ```
 
+* **Upload PDF**: Use the button in the top bar to add and index new documents on the fly.
+
 ### Extractor (Process PDFs)
 
 ```bash
@@ -37,12 +39,7 @@ uv run python examples/chat_qa.py
 
 ## Extraction Methods
 
-Set `PDF_EXTRACTION_METHOD` in `config.py`:
-
-| Value | Description |
-| --- | --- |
-| `"pdfplumber"` | Fast, text-based (digital PDFs only) |
-| `"ollama-vision"` | Full OCR via local Ollama `llava-phi3` vision model |
+By default, the system uses **pdfplumber** for fast text extraction. Tables are extracted on demand in the Gradio UI using **GPT-4o Vision** (OpenAI); extracted tables are synced to DuckDB for QA and Text-to-SQL.
 
 ## Common Options
 
@@ -59,10 +56,22 @@ Set `PDF_EXTRACTION_METHOD` in `config.py`:
 
 ## Output Files
 
-| File | Content |
+| Output | Description |
 | --- | --- |
 | `{name}_text.txt` | Clean text content |
-| `{name}_table_{n}.csv` | Extracted tables in CSV format |
+| `{name}_table_p{page}_{n}.csv` | Extracted tables in CSV format (page optional in name); synced to DuckDB for QA |
+
+## Table Storage (DuckDB)
+
+Extracted table CSVs are ingested into `data/vector_db/tables.duckdb`. The QA engine can run Text-to-SQL over these tables. Edits to tables in the Gradio UI are saved back to CSV and reloaded into DuckDB.
+
+## Metadata Filtering
+
+The QA Engine automatically extracts and uses:
+
+* **Company**: Tesla, Equinor, etc.
+* **Year/Quarter**: 2024, Q1, etc.
+* **Type**: Transcript, Report, etc.
 
 ## Troubleshooting
 
@@ -79,11 +88,11 @@ Ensure the filename passed to `--file` exists in `data/raw/`.
 
 ## Performance Tips
 
-- **Text Only**: Tables are extracted by default. Ensure you use `--skip-tables` for faster text search processing if you don't need tables.
-- **No Cleaning**: Use `--no-cleaning` to skip OpenAI processing for raw extraction.
-- **Process Single File**: Always test with one file first before running the full batch.
+* **Text Only**: The CLI extracts text by default (no table extraction in batch). Use `--skip-tables` if you run with table extraction enabled. Tables are usually extracted on demand in the Gradio UI.
+* **No Cleaning**: Use `--no-cleaning` to skip OpenAI processing for raw extraction.
+* **Process Single File**: Always test with one file first before running the full batch.
 
 ## Documentation
 
-- [**System Architecture**](architecture.md): High-level system design.
-- [**README**](../README.md): Main project guide.
+* [**System Architecture**](architecture.md): High-level system design.
+* [**README**](../README.md): Main project guide.

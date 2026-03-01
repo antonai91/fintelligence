@@ -3,7 +3,7 @@ Concrete implementations of PDF extraction strategies.
 
 This module provides different strategies for extracting text and tables from PDFs:
 - PdfPlumberExtractor: Fast text-based extraction using pdfplumber
-- OllamaVisionExtractor: Vision-based table extraction using local Ollama
+- GPT4VisionExtractor: Vision-based table extraction using OpenAI GPT-4o-mini
 """
 
 import base64

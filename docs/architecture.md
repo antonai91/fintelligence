@@ -1,8 +1,8 @@
-# Technical Documentation: Investor Relations Document Explorer & QA Engine
+# Technical Documentation: Financial Document Explorer & QA Engine
 
 ## 1. Solution Overview
 
-This solution is an automated system designed to process and analyze financial reports from Equinor's Investor Relations. It creates a searchable knowledge base using Retrieval-Augmented Generation (RAG) to answer user queries about the company's financial performance.
+This solution is an automated system designed to process and analyze financial reports and investor relations documents. It creates a searchable knowledge base using Retrieval-Augmented Generation (RAG) to answer user queries across multiple companies.
 
 ## 2. System Architecture
 
@@ -25,15 +25,16 @@ investor_relations_scraper/
 │       ├── search.py              # FAISS vector store & hybrid search engine
 │       ├── conversation_memory.py # Chat history management
 │       ├── qa_engine.py           # QA orchestrator (Plan → Retrieve → Synthesize)
+│       ├── table_db.py            # DuckDB manager for table ingestion & Text-to-SQL
 │       └── extractors/            # PDF extraction strategies
 │           ├── base.py            # Abstract base classes
 │           ├── metadata_extractors.py
-│           └── pdf_extractors.py  # PdfPlumber and Ollama Vision
+│           └── pdf_extractors.py  # PdfPlumber and GPT-4o Vision
 ├── data/
 │   ├── raw/            # Downloaded PDFs
 │   ├── processed/      # Cleaned text and CSV tables
 │   ├── interim/        # Temporary files
-│   └── vector_db/      # FAISS index and BM25 data
+│   └── vector_db/      # FAISS index, BM25 data, and DuckDB tables (tables.duckdb)
 ├── examples/           # Example usage scripts
 ├── tests/              # Test suite
 └── docs/               # Documentation
@@ -43,17 +44,14 @@ investor_relations_scraper/
 
 ### 3.1. Extractor Module (`cli.py` + `extractors/`)
 
-* **Technology**: `pdfplumber`, `Ollama`, `OpenAI API` (`gpt-4o`/`gpt-4o-mini`).
-* **Extraction Methods** (configured via `PDF_EXTRACTION_METHOD` in `config.py`):
-
-| Method | Value | Description |
-| --- | --- | --- |
-| **pdfplumber** | `"pdfplumber"` | Fast, text-based extraction for digital PDFs |
-| **Ollama Vision** | `"ollama-vision"` | Full OCR using a local vision-language model (`llava-phi3`) via Ollama |
+* **Technology**: `pdfplumber`, `OpenAI API` (`gpt-4o`/`gpt-4o-mini`).
+* **Extraction Methods**:
+  * **pdfplumber** (`PdfPlumberExtractor`): Fast, text-based extraction for digital PDFs; used for both CLI batch text and table structure detection.
+  * **GPT-4o Vision** (`GPT4VisionExtractor`): Vision-based table extraction via OpenAI; used on-demand from the UI (and optionally for batch). Uses a pdfplumber pre-filter to send only pages with structural tables to the API.
 
 * **Process**:
-    1. **Text Extraction**: Uses the configured extraction strategy (pdfplumber or Ollama OCR).
-    2. **Table Extraction**: Identifies and extracts tables (CLI batch extraction skips tables by default in favor of interactive parsing).
+    1. **Text Extraction**: Uses pdfplumber for all batch text extraction.
+    2. **Table Extraction**: CLI batch runs text-only by default; tables are extracted on demand in the UI (or via vision when configured). Table CSVs are synced into DuckDB for QA.
     3. **Cleaning & Structuring**:
         * Uses OpenAI's models to clean raw text (fix formatting, remove artifacts).
         * Converts extracted tables into clean CSV format.
@@ -65,9 +63,13 @@ investor_relations_scraper/
 
 * **Technology**: `Gradio`.
 * **Purpose**: A unified explorer providing three-column synced capability:
-  * Left side for viewing original rendered PDF pages and Interactive Vision Table Extraction.
-  * Right side for maintaining page-specific markdown notes.
-  * Bottom panel holding the Agentic QA Engine for chatting with the loaded reports.
+  * Left side for viewing original rendered PDF pages, **Uploading new documents**, and Interactive Vision Table Extraction.
+  * Right side for maintaining the AI Assistant chat interface.
+* **Upload Pipeline**: The UI features an "Upload PDF" button that triggers an asynchronous pipeline:
+    1. **Saves** the file to the local `data/raw/` directory.
+    2. **Processes** the document using `PDFExtractor` to extract and clean text using GPT-4o-mini.
+    3. **Indexes** the new content immediately into the Vector Store and DuckDB database.
+    4. **Refreshes** the document selection for instant exploration.
 
 ### 3.3. QA Engine
 
@@ -83,11 +85,13 @@ The QA engine is split across four focused modules:
 #### A. Metadata Extraction (`document_loader.py`)
 
 * **Model**: `gpt-4o` (High capabilities).
-* **Method**: Reads the first 3000 characters of a document to intelligently categorize it by:
+* **Method**: Reads the first several thousand characters of a document to intelligently categorize it by:
   * **Quarter** (Q1, Q2, Q3, Q4)
   * **Year** (2024, 2025, etc.)
   * **Document Type** (Report, Transcript, Presentation, Financial Statements)
-  * **Company Name** and **Title**.
+  * **Company Name** (Crucial for multi-company support)
+  * **Title**.
+* **Integration**: The `company` metadata is used both in the planning phase (deciding which source to use) and the synthesis phase (ensuring the AI knows whose data it is citing).
 * **Fallback**: Uses Regex on the filename if LLM extraction fails.
 
 #### B. Indexing & Storage (`search.py`)
@@ -119,14 +123,21 @@ The `QAEngine` uses a three-stage agentic pipeline:
 * **Model**: `gpt-4o-mini`.
 * **Memory**: Maintains a conversation history (persisted to disk) to allow follow-up questions.
 
+### E. Table Storage & Text-to-SQL (`table_db.py`)
+
+* **Database**: DuckDB stores extracted table CSVs in `data/vector_db/tables.duckdb` (config: `TABLE_DB_PATH`).
+* **Catalog**: A metadata table `_table_catalog` tracks CSV filename, SQL table name, source PDF, and schema for each ingested table.
+* **Sync**: The Gradio UI and pipeline sync tables from `data/processed/*_table_*.csv` into DuckDB; edits saved in the UI overwrite the CSV and reload the corresponding DuckDB table.
+* **QA Integration**: The QA engine can run Text-to-SQL over DuckDB when answering analytical questions across companies and tables.
+
 ## 4. Configuration (`config.py`)
 
 The system is highly configurable via `config.py` and `.env` variables:
 
-* **Models**: Switch between `gpt-4o` and `gpt-4o-mini` for different tasks to balance cost/performance.
-* **PDF Extraction**: Choose between `pdfplumber` or `ollama-vision` modes.
-* **Processing**: Adjustable chunk sizes, overlap, and token limits.
-* **Device**: Supports `cpu`, `cuda`, and `mps` (Mac).
+* **Models**: Switch between `gpt-4o` and `gpt-4o-mini` for extractor, QA, metadata, and table extraction (`MODEL_EXTRACTOR`, `MODEL_QA`, `MODEL_METADATA`, `MODEL_TABLE_EXTRACTOR`).
+* **PDF Extraction**: Text extraction uses pdfplumber; vision-based table extraction uses OpenAI (`MODEL_TABLE_EXTRACTOR`, on-demand from UI).
+* **Processing**: Adjustable chunk sizes, token limits, and DuckDB table indexing (`TABLE_DB_PATH`, `MIN_TABLE_ROWS_FOR_INDEX`).
+* **Device**: Embedding model supports `cpu`, `cuda`, and `mps` (Mac) via `MODEL_DEVICE`.
 
 ## 5. Dependencies
 

@@ -1,6 +1,6 @@
-# Equinor Investor Relations Explorer
+# Financial Document Explorer
 
-A Python-based e-reader and analytical QA engine for processing financial reports from Equinor's investor relations.
+A Python-based e-reader and analytical QA engine for processing financial reports and investor relations documents.
 
 ## Setup
 
@@ -32,24 +32,7 @@ MODEL_EXTRACTOR = "gpt-4o"  # or "gpt-4o-mini"
 MODEL_QA = "gpt-4o"         # or "gpt-4o-mini"
 ```
 
-## Local LLM with Ollama (Optional)
-
-This project supports using local vision models via [Ollama](https://ollama.ai/) for high-quality table extraction.
-
-1. Install Ollama: Download and install from [ollama.ai](https://ollama.ai/).
-2. Pull the model:
-
-```bash
-ollama run llava-phi3
-```
-
-1. Configure: In `src/investor_relations_scraper/config.py`, ensure `PDF_EXTRACTION_METHOD` is set to `"ollama-vision"`.
-
-> **Note**: Ensure the Ollama app is running (check your menu bar) or run `ollama serve` in a separate terminal before starting extraction.
-
-## Usage
-
-### Interactive Gradio UI (Recommended)
+## Interactive Gradio UI (Recommended)
 
 The interactive way to explore and extract data is via the Gradio E-Reader Frontend:
 
@@ -57,8 +40,11 @@ The interactive way to explore and extract data is via the Gradio E-Reader Front
 uv run python app.py
 ```
 
+## Usage
+
 This provides a three-column layout where you can:
 
+- **Upload New Documents**: Use the "Upload PDF" button to add any financial report to the system. It will be automatically converted to text, cleaned by AI, and indexed for immediate QA.
 - Browse PDF pages alongside extracted text and tables.
 - Interactively extract tables from specific pages using local vision models.
 - **Edit and Save Tables**: Modifying and saving a table in the UI completely overwrites the existing table for that page and immediately syncs the changes to the underlying DuckDB database, providing instant updates for the QA chat.
@@ -67,10 +53,11 @@ This provides a three-column layout where you can:
 
 ## Features
 
-- **Interactive E-Reader**: Gradio-based web UI for reading, interactive extracting, and QA chat
-- **Agentic QA**: Plan → Retrieve → Synthesize pipeline for answering financial questions with both text and embedded CSV tables
-- **Error Handling**: Robust error handling
-- **Progress Tracking**: Shows processing tracking and status
+- **Interactive E-Reader**: Gradio-based web UI for reading, interactive extracting, and QA chat.
+- **Direct PDF Upload**: Upload and process new documents directly from the web interface.
+- **Company-Aware Agentic QA**: Plan → Retrieve → Synthesize pipeline that understands multiple companies and cites specific sources.
+- **Visual Table Extraction**: On-demand table extraction using OpenAI Vision models.
+- **Progress Tracking**: Real-time status updates during document processing.
 
 ## Project Structure
 
@@ -105,18 +92,9 @@ investor_relations_scraper/
 
 All dependencies are managed via the `pyproject.toml` file.
 
-## PDF Extractor
+### PDF Extractor
 
-The extractor processes downloaded PDFs and uses OpenAI to clean and structure the data. Two extraction methods are available (set in `config.py`):
-
-| Method | `PDF_EXTRACTION_METHOD` | Description |
-| --- | --- | --- |
-| **pdfplumber** | `"pdfplumber"` | Fast, text-based extraction |
-| **Ollama Vision** | `"ollama-vision"` | Local OCR via `llava-phi3` (Requires Ollama) |
-
-### Extractor Usage
-
-By default, the extractor CLI processes both text and tables.
+The extractor processes downloaded PDFs and uses OpenAI to clean and structure the data.
 
 Process a single PDF:
 
