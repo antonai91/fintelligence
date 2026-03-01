@@ -11,6 +11,7 @@ import base64
 import re
 import sys
 import traceback
+import json
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -155,28 +156,25 @@ def on_next_page(page_num, pdf_name):
 # Table extraction
 # ---------------------------------------------------------------------------
 
-def _parse_csv_blocks(content: str) -> List[pd.DataFrame]:
-    content = re.sub(r'^```(?:csv)?\s*', '', content, flags=re.MULTILINE)
+def _parse_json_blocks(content: str) -> List[pd.DataFrame]:
+    """Parse JSON format into DataFrames."""
+    content = re.sub(r'^```(?:json)?\s*', '', content, flags=re.MULTILINE)
     content = re.sub(r'\s*```$', '', content, flags=re.MULTILINE)
-    tables = []
-    for block in re.split(r'\n\s*---TABLE---\s*\n', content):
-        block = block.strip()
-        if not block:
-            continue
-        try:
-            df = pd.read_csv(StringIO(block), skipinitialspace=True)
-            if not df.empty:
-                tables.append(df)
-        except Exception:
-            lines = [l for l in block.splitlines() if l.strip()]
-            if len(lines) >= 2:
-                try:
-                    df = pd.read_csv(StringIO("\n".join(lines)), skipinitialspace=True)
-                    if not df.empty:
-                        tables.append(df)
-                except Exception:
-                    pass
-    return tables
+    try:
+        data = json.loads(content)
+        if not isinstance(data, list):
+            return []
+        tables = []
+        for table_obj in data:
+            if isinstance(table_obj, dict) and "headers" in table_obj and "rows" in table_obj:
+                df = pd.DataFrame(table_obj["rows"], columns=table_obj["headers"])
+                # pad rows if GPT missed some columns
+                if not df.empty:
+                    tables.append(df)
+        return tables
+    except Exception as e:
+        print(f"Failed to parse JSON blocks: {e}\nContent was:\n{content[:200]}...")
+        return []
 
 
 
@@ -187,28 +185,38 @@ def _gpt_extract(client, model: str, data_uri: str, page_num: int) -> List[pd.Da
             messages=[{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
                 {"type": "text", "text": (
-                    "Extract ALL tables from this financial report page as CSV.\n"
+                    "Extract ALL tables from this financial report page as a specific JSON format.\n"
                     "CRITICAL RULES FOR ACCURACY:\n"
                     "1. DO NOT calculate, guess, or hallucinate numbers. Copy EXACTLY what you see.\n"
-                    "2. If a cell is blank in the image, strictly leave it blank (e.g., `value,,value`).\n"
-                    "3. If a cell contains a dash `-`, output a dash `-`.\n"
-                    "4. Preserve all numbers exactly with commas (e.g., if it says 10,620, output 10,620).\n"
-                    "5. Convert parenthesised negatives: (75) MUST become -75.\n"
+                    "2. If a cell is blank in the image, strictly output an empty string `\"\"`.\n"
+                    "3. If a cell contains a dash `-`, output a dash `\"-\"`.\n"
+                    "4. Preserve all numbers exactly with commas (e.g., if it says 10,620, output \"10,620\").\n"
+                    "5. Convert parenthesised negatives: (75) MUST become \"-75\".\n"
                     "6. Remove footnote markers (* ** 1 2 etc.).\n"
-                    "7. Use exact column headers. Flatten multi-level headers with spaces (e.g. 'E&P Norway Pre-tax').\n"
+                    "7. Use exact column headers. Flatten multi-level headers with spaces.\n"
                     "8. Keep row labels in the first column. Repeat merged cell labels on each row they span.\n\n"
-                    "FORMATTING:\n"
-                    "- Use standard comma-separated values (CSV).\n"
-                    "- YOU MUST ENCLOSE EVERY CELL IN DOUBLE QUOTES if it contains a comma (e.g. `\"10,620\"`, `\"E&P, Norway\"`). This is critical so commas inside numbers don't break the CSV columns.\n"
-                    "- Separate multiple tables with exactly this line: ---TABLE---\n"
-                    "- Return ONLY raw CSV text. No fences (```), no explanations.\n"
+                    "FORMATTING REQUIREMENTS:\n"
+                    "You MUST output ONLY a valid JSON array of table objects. Example format:\n"
+                    "[\n"
+                    "  {\n"
+                    "    \"headers\": [\"Indicator\", \"1Q25\", \"1Q24\"],\n"
+                    "    \"rows\": [\n"
+                    "      [\"Earnings\", \"10,620\", \"9,800\"],\n"
+                    "      [\"Taxes\", \"-3,226\", \"-3,849\"]\n"
+                    "    ]\n"
+                    "  }\n"
+                    "]\n\n"
+                    "- Return ONLY JSON code. No markdown fences (```), no explanations.\n"
                     "- If NO tables exist on the page, respond exactly: NO_TABLES"
                 )}
             ]}],
             max_tokens=4096, temperature=0.0,
+            response_format={"type": "json_object"} if "gpt-4o" not in model.lower() else None # Force JSON if supported
         )
         content = r.choices[0].message.content.strip()
-        return [] if not content or content == "NO_TABLES" else _parse_csv_blocks(content)
+        if content == "NO_TABLES" or '"headers"' not in content:
+            return []
+        return _parse_json_blocks(content)
     except Exception as e:
         print(f"  ✗ Extract error p{page_num}: {e}")
         return []
@@ -217,33 +225,39 @@ def _gpt_extract(client, model: str, data_uri: str, page_num: int) -> List[pd.Da
 def _gpt_verify(client, model: str, data_uri: str, tables: List[pd.DataFrame], page_num: int) -> List[pd.DataFrame]:
     if not tables:
         return tables
-    csv_text = "\n\n".join(f"=== TABLE {i+1} ===\n{df.to_csv(index=False)}" for i, df in enumerate(tables))
+    json_payload = []
+    for df in tables:
+        json_payload.append({
+            "headers": df.columns.tolist(),
+            "rows": df.values.tolist()
+        })
+    json_text = json.dumps(json_payload, indent=2)
+    
     try:
         r = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
                 {"type": "text", "text": (
-                    f"Below is a first-pass CSV extraction from this financial report page.\n"
+                    f"Below is a first-pass JSON extraction from this financial report page.\n"
                     f"CRITICAL TASK: Check it carefully against the original image and correct ANY hallucinated, calculated, or incorrect numbers.\n\n"
-                    f"Current extraction:\n{csv_text}\n\n"
+                    f"Current extraction:\n{json_text}\n\n"
                     "RULES FOR CORRECTION:\n"
                     "1. EVERY number must EXACTLY match the image. Do not calculate missing totals.\n"
                     "2. Fix wrong column placements and misaligned rows.\n"
-                    "3. (100) must be -100.\n"
-                    "4. Empty cells must be empty, dashes must be dashes.\n"
-                    "5. Output the corrected CSV only.\n"
-                    "6. ANY cell with a comma MUST be wrapped in double quotes (e.g. `\"10,620\"`).\n"
-                    "7. You MUST return exactly the same number of tables, separated by ---TABLE---.\n"
-                    "8. Return ONLY raw CSV, no markdown fences or preambles."
+                    "3. (100) must be \"-100\".\n"
+                    "4. Empty cells must be empty strings `\"\"`.\n"
+                    "5. Output the corrected JSON only (using same array of dicts format).\n"
+                    "6. You MUST return exactly the same number of tables.\n"
+                    "7. Return ONLY raw JSON code, no markdown fences or preambles."
                 )}
             ]}],
             max_tokens=4096, temperature=0.0,
         )
         content = r.choices[0].message.content.strip()
-        if not content or content == "NO_TABLES":
+        if not content or content == "NO_TABLES" or "headers" not in content:
             return tables
-        corrected = _parse_csv_blocks(content)
+        corrected = _parse_json_blocks(content)
         if len(corrected) == len(tables):
             print(f"  ✅ Verified {len(tables)} table(s) on page {page_num}")
             return corrected
