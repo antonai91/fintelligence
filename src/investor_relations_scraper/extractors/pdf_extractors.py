@@ -252,3 +252,166 @@ class GPT4VisionExtractor(BasePDFExtractor):
 
     def get_name(self) -> str:
         return f"GPT-4o Vision ({self.model})"
+
+
+class GLMOCRExtractor(BasePDFExtractor):
+    """
+    Extract tables from PDFs using GLM-OCR-mlx locally via mlx-vlm.
+
+    Runs entirely on Apple Silicon (MLX) — no API calls, no cost.
+    GLM-OCR is a 0.9B-parameter multimodal OCR model optimised for
+    document understanding including table recognition.
+
+    The model is loaded lazily on first use and cached for the
+    lifetime of the process.
+    """
+
+    def __init__(self, model_id: Optional[str] = None, max_tokens: int = 8192):
+        """
+        Args:
+            model_id: HuggingFace model ID (default: config.MODEL_TABLE_EXTRACTOR_LOCAL)
+            max_tokens: Maximum tokens for generation (default: 8192)
+        """
+        from .. import config
+        self.model_id = model_id or config.MODEL_TABLE_EXTRACTOR_LOCAL
+        self.max_tokens = max_tokens
+        self._model = None
+        self._processor = None
+        self._config = None
+        self._pdfplumber = PdfPlumberExtractor()
+
+    def _ensure_model_loaded(self):
+        """Lazy-load the GLM-OCR model and processor on first use."""
+        if self._model is None:
+            print(f"  ⏳ Loading GLM-OCR model ({self.model_id})…")
+            from mlx_vlm import load
+            from mlx_vlm.utils import load_config
+            self._model, self._processor = load(self.model_id)
+            self._config = load_config(self.model_id)
+            print(f"  ✅ GLM-OCR model loaded.")
+
+    def _page_to_pil(self, pdf_path: Path, page_num: int):
+        """Convert a single PDF page to a PIL Image."""
+        try:
+            from pdf2image import convert_from_path
+            images = convert_from_path(
+                pdf_path, dpi=150, first_page=page_num, last_page=page_num
+            )
+            return images[0] if images else None
+        except ImportError:
+            raise ImportError(
+                "pdf2image is required for GLM-OCR extraction. "
+                "Install it with: uv add pdf2image"
+            )
+        except Exception as e:
+            print(f"  ✗ Error converting page {page_num} to image: {e}")
+            return None
+
+    def _extract_tables_from_image(self, image, page_num: int) -> List[pd.DataFrame]:
+        """Send a single page image to GLM-OCR and parse returned HTML tables."""
+        try:
+            from mlx_vlm import generate
+            from mlx_vlm.prompt_utils import apply_chat_template
+
+            # Save PIL image to a temp file for mlx-vlm
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                image.save(tmp, format="PNG")
+                tmp_path = tmp.name
+
+            prompt = "Table Recognition:"
+            formatted_prompt = apply_chat_template(
+                self._processor, self._config, prompt, num_images=1
+            )
+
+            output = generate(
+                self._model,
+                self._processor,
+                formatted_prompt,
+                [tmp_path],
+                max_tokens=self.max_tokens,
+                temperature=0.0,
+                verbose=False,
+            )
+
+            # Clean up temp file
+            Path(tmp_path).unlink(missing_ok=True)
+
+            # mlx_vlm.generate() returns a GenerationResult dataclass — get the text
+            text = output.text if hasattr(output, 'text') else str(output)
+
+            if not text or not text.strip():
+                return []
+
+            # GLM-OCR returns HTML table markup — parse with pandas
+            return self._parse_html_tables(text, page_num)
+
+        except Exception as e:
+            print(f"  ✗ GLM-OCR error on page {page_num}: {e}")
+            return []
+
+    def _parse_html_tables(self, html_content: str, page_num: int) -> List[pd.DataFrame]:
+        """Parse HTML table markup from GLM-OCR output into DataFrames."""
+        tables = []
+        try:
+            # pandas.read_html expects a string containing <table> tags
+            if "<table" not in html_content.lower():
+                return []
+            dfs = pd.read_html(StringIO(html_content))
+            for df in dfs:
+                if not df.empty:
+                    tables.append(df)
+        except Exception as e:
+            print(f"  ⚠ Could not parse GLM-OCR HTML output for page {page_num}: {e}")
+        return tables
+
+    def extract_text(self, pdf_path: Path) -> str:
+        """Use pdfplumber for text (fast, accurate for digital PDFs)."""
+        return self._pdfplumber.extract_text(pdf_path)
+
+    def extract_tables(self, pdf_path: Path) -> List[Tuple[int, pd.DataFrame]]:
+        """
+        Extract tables from PDF pages using GLM-OCR locally.
+        Uses pdfplumber pre-filter to skip pages without structural tables.
+        """
+        self._ensure_model_loaded()
+
+        # Pre-filter: find pages with tables
+        print("  🔍 Running fast table heuristic pre-filter...")
+        suspect_pages = set()
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                total_pages = len(pdf.pages)
+                for page_num, page in enumerate(pdf.pages, 1):
+                    if page.extract_tables():
+                        suspect_pages.add(page_num)
+        except Exception as e:
+            print(f"  ⚠ Pre-filter failed: {e}. Scanning all pages.")
+            total_pages = 0
+
+        if not suspect_pages:
+            print("  ⏩ No structural tables detected. Skipping GLM-OCR pass.")
+            return []
+
+        print(f"  🎯 Filtered to {len(suspect_pages)} pages (out of {total_pages} total).")
+        print(f"  🧠 Extracting tables with GLM-OCR ({self.model_id})…")
+
+        all_tables: List[Tuple[int, pd.DataFrame]] = []
+        for page_num in sorted(suspect_pages):
+            image = self._page_to_pil(pdf_path, page_num)
+            if image is None:
+                continue
+            page_tables = self._extract_tables_from_image(image, page_num)
+            if page_tables:
+                print(f"  ✓ Page {page_num}: found {len(page_tables)} table(s)")
+                for df in page_tables:
+                    all_tables.append((page_num, df))
+
+        print(f"  📊 Total tables extracted: {len(all_tables)}")
+        return all_tables
+
+    def supports_ocr(self) -> bool:
+        return True
+
+    def get_name(self) -> str:
+        return f"GLM-OCR Local ({self.model_id})"

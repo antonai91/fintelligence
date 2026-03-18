@@ -63,6 +63,13 @@ METADATA_EXTRACTION_METHOD = "hybrid"
 # Model for vision-based table extraction from PDF page images via the OpenAI API
 # Tables are only extracted on demand from the Gradio UI, never in batch.
 MODEL_TABLE_EXTRACTOR = "gpt-4o-mini"
+
+# Model for local vision-based table extraction via mlx-vlm (runs on Apple Silicon)
+# Uses GLM-OCR converted to MLX format for zero-cost offline table extraction
+MODEL_TABLE_EXTRACTOR_LOCAL = "EZCon/GLM-OCR-mlx"
+
+# Maximum tokens for GLM-OCR table generation
+TABLE_EXTRACTOR_MAX_TOKENS = 8192
 # ============================================================================
 # Directory Configuration
 # ============================================================================

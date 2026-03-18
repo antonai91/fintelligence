@@ -8,7 +8,7 @@ from .metadata_extractors import (
     RegexMetadataExtractor,
     HybridMetadataExtractor,
 )
-from .pdf_extractors import PdfPlumberExtractor, GPT4VisionExtractor
+from .pdf_extractors import PdfPlumberExtractor, GPT4VisionExtractor, GLMOCRExtractor
 
 __all__ = [
     "BaseMetadataExtractor",
@@ -18,4 +18,6 @@ __all__ = [
     "HybridMetadataExtractor",
     "PdfPlumberExtractor",
     "GPT4VisionExtractor",
+    "GLMOCRExtractor",
 ]
+

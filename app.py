@@ -363,32 +363,117 @@ def _gpt_verify(client, model: str, data_uri: str, tables: List[pd.DataFrame], p
         return tables
 
 
-def on_extract_page_table(pdf_name: str, page_num: int):
+# ---------------------------------------------------------------------------
+# GLM-OCR local extraction (lazy singleton)
+# ---------------------------------------------------------------------------
+
+_glm_ocr_model = None
+_glm_ocr_processor = None
+_glm_ocr_config = None
+
+
+def _ensure_glm_ocr_loaded():
+    """Lazy-load the GLM-OCR model via mlx-vlm (cached for process lifetime)."""
+    global _glm_ocr_model, _glm_ocr_processor, _glm_ocr_config
+    if _glm_ocr_model is None:
+        print(f"  ⏳ Loading GLM-OCR model ({config.MODEL_TABLE_EXTRACTOR_LOCAL})…")
+        from mlx_vlm import load
+        from mlx_vlm.utils import load_config
+        _glm_ocr_model, _glm_ocr_processor = load(config.MODEL_TABLE_EXTRACTOR_LOCAL)
+        _glm_ocr_config = load_config(config.MODEL_TABLE_EXTRACTOR_LOCAL)
+        print("  ✅ GLM-OCR model loaded.")
+
+
+def _glm_ocr_extract(pil_image, page_num: int) -> List[pd.DataFrame]:
+    """Run GLM-OCR table recognition on a PIL image and return DataFrames."""
+    try:
+        _ensure_glm_ocr_loaded()
+        from mlx_vlm import generate
+        from mlx_vlm.prompt_utils import apply_chat_template
+
+        # Save PIL image to a temp file for mlx-vlm
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            pil_image.save(tmp, format="PNG")
+            tmp_path = tmp.name
+
+        prompt = "Table Recognition:"
+        formatted_prompt = apply_chat_template(
+            _glm_ocr_processor, _glm_ocr_config, prompt, num_images=1
+        )
+
+        output = generate(
+            _glm_ocr_model,
+            _glm_ocr_processor,
+            formatted_prompt,
+            [tmp_path],
+            max_tokens=config.TABLE_EXTRACTOR_MAX_TOKENS,
+            temperature=0.0,
+            verbose=False,
+        )
+
+        # Clean up temp file
+        Path(tmp_path).unlink(missing_ok=True)
+
+        # mlx_vlm.generate() returns a GenerationResult dataclass — get the text
+        text = output.text if hasattr(output, 'text') else str(output)
+
+        if not text or not text.strip():
+            return []
+
+        # GLM-OCR returns HTML table markup — parse with pandas
+        if "<table" not in text.lower():
+            return []
+        dfs = pd.read_html(StringIO(text))
+        return [df for df in dfs if not df.empty]
+
+    except Exception as e:
+        print(f"  ✗ GLM-OCR error on page {page_num}: {e}")
+        return []
+
+
+def on_extract_page_table(pdf_name: str, page_num: int, use_local_ocr: bool = True):
     if not pdf_name:
         return None, gr.Group(visible=False), "⚠ No document selected", {}, 0, gr.Dropdown(choices=[])
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=config.get_openai_api_key())
         pdf_path = RAW_DIR / pdf_name
         pn = int(page_num)
-        print(f"  🖼 Rendering page {pn}…")
-        uri = _page_to_base64(pdf_path, pn)
-        if not uri:
-            return None, gr.Group(visible=False), f"⚠ Could not render page {pn}", {}, 0, gr.Dropdown(choices=[])
-        print("  🔍 Pass 1 — extracting…")
-        tables = _gpt_extract(client, config.MODEL_TABLE_EXTRACTOR, uri, pn)
+
+        if use_local_ocr:
+            # ── Local GLM-OCR path ──
+            print(f"  🖼 Rendering page {pn} for GLM-OCR…")
+            from pdf2image import convert_from_path
+            images = convert_from_path(pdf_path, dpi=150, first_page=pn, last_page=pn)
+            if not images:
+                return None, gr.Group(visible=False), f"⚠ Could not render page {pn}", {}, 0, gr.Dropdown(choices=[])
+            print("  🧠 Extracting tables with GLM-OCR (local)…")
+            tables = _glm_ocr_extract(images[0], pn)
+        else:
+            # ── Cloud GPT-4o-mini path ──
+            from openai import OpenAI
+            client = OpenAI(api_key=config.get_openai_api_key())
+            print(f"  🖼 Rendering page {pn}…")
+            uri = _page_to_base64(pdf_path, pn)
+            if not uri:
+                return None, gr.Group(visible=False), f"⚠ Could not render page {pn}", {}, 0, gr.Dropdown(choices=[])
+            print("  🔍 Pass 1 — extracting…")
+            tables = _gpt_extract(client, config.MODEL_TABLE_EXTRACTOR, uri, pn)
+            if tables:
+                print("  🔄 Pass 2 — verifying…")
+                tables = _gpt_verify(client, config.MODEL_TABLE_EXTRACTOR, uri, tables, pn)
+
         if not tables:
             return None, gr.Group(visible=False), "ℹ No tables found on this page.", {}, 0, gr.Dropdown(choices=[])
-        print("  🔄 Pass 2 — verifying…")
-        tables = _gpt_verify(client, config.MODEL_TABLE_EXTRACTOR, uri, tables, pn)
+
         state = {"tables": [df.to_dict(orient="records") for df in tables],
                  "columns": [list(df.columns) for df in tables]}
         n = len(tables)
         first_df = tables[0]
+        method = "GLM-OCR (local)" if use_local_ocr else "GPT-4o-mini (cloud)"
         return (
             first_df,
             gr.Group(visible=True),
-            f"✅ Extracted & verified {n} table(s). Reviewing 1 of {n}.",
+            f"✅ Extracted {n} table(s) via {method}. Reviewing 1 of {n}.",
             state, 0,
             gr.Dropdown(choices=list(first_df.columns), value=None, label="Select column to delete"),
         )
@@ -829,8 +914,12 @@ with gr.Blocks(
             with gr.Accordion("🔍 Extract & Verify Tables (This Page)", open=True):
                 with gr.Row():
                     extract_btn = gr.Button(
-                        "Extract Tables with GPT-4o-mini",
+                        "Extract Tables",
                         variant="secondary", scale=2,
+                    )
+                    use_local_ocr = gr.Checkbox(
+                        label="🧠 Local GLM-OCR", value=True,
+                        info="Use local MLX model (free, offline) vs cloud GPT-4o-mini",
                     )
                 extract_status = gr.Textbox(
                     label="", interactive=False, value="",
@@ -915,11 +1004,12 @@ with gr.Blocks(
     # ── Wiring: Table Extraction ──
 
     extract_btn.click(
-        fn=lambda: gr.Textbox(value="⏳ Pass 1 — extracting…  (Pass 2 verification follows)"),
+        fn=lambda local: gr.Textbox(value="⏳ Extracting tables with " + ("GLM-OCR (local)…" if local else "GPT-4o-mini (cloud)…")),
+        inputs=[use_local_ocr],
         outputs=[extract_status],
     ).then(
         fn=on_extract_page_table,
-        inputs=[pdf_dropdown, page_slider],
+        inputs=[pdf_dropdown, page_slider, use_local_ocr],
         outputs=[editable_table, extract_group, extract_status, extracted_tables_state, table_idx_state, col_to_delete],
     )
 

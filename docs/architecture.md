@@ -44,14 +44,15 @@ investor_relations_scraper/
 
 ### 3.1. Extractor Module (`cli.py` + `extractors/`)
 
-* **Technology**: `pdfplumber`, `OpenAI API` (`gpt-4o`/`gpt-4o-mini`).
+* **Technology**: `pdfplumber`, `OpenAI API` (`gpt-4o`/`gpt-4o-mini`), `mlx-vlm` + `GLM-OCR-mlx`.
 * **Extraction Methods**:
   * **pdfplumber** (`PdfPlumberExtractor`): Fast, text-based extraction for digital PDFs; used for both CLI batch text and table structure detection.
-  * **GPT-4o Vision** (`GPT4VisionExtractor`): Vision-based table extraction via OpenAI; used on-demand from the UI (and optionally for batch). Uses a pdfplumber pre-filter to send only pages with structural tables to the API.
+  * **GPT-4o Vision** (`GPT4VisionExtractor`): Vision-based table extraction via OpenAI; used on-demand from the UI. Uses a pdfplumber pre-filter to send only pages with structural tables to the API.
+  * **GLM-OCR Local** (`GLMOCRExtractor`): Local vision-based table extraction via `mlx-vlm` on Apple Silicon. Uses the `EZCon/GLM-OCR-mlx` model (0.9B params) with the `"Table Recognition:"` prompt. Zero-cost, fully offline. Returns HTML table markup parsed into DataFrames via `pandas.read_html()`. Default in the UI.
 
 * **Process**:
     1. **Text Extraction**: Uses pdfplumber for all batch text extraction.
-    2. **Table Extraction**: CLI batch runs text-only by default; tables are extracted on demand in the UI (or via vision when configured). Table CSVs are synced into DuckDB for QA.
+    2. **Table Extraction**: CLI batch runs text-only by default; tables are extracted on demand in the UI using either GLM-OCR (local, default) or GPT-4o-mini (cloud) — toggled via a checkbox. Table CSVs are synced into DuckDB for QA.
     3. **Cleaning & Structuring**:
         * Uses OpenAI's models to clean raw text (fix formatting, remove artifacts).
         * Converts extracted tables into clean CSV format.
@@ -147,4 +148,6 @@ The system is highly configurable via `config.py` and `.env` variables:
 * `rank-bm25`: Keyword search.
 * `pandas` / `numpy`: Data manipulation.
 * `gradio`: Web interface.
-* `pdf2image` (optional): Required for rendering PDF pages as images for Ollama vision.
+* `mlx-vlm`: Local vision language model inference on Apple Silicon (used for GLM-OCR table extraction).
+* `pdf2image`: Required for rendering PDF pages as images for vision-based table extraction.
+
