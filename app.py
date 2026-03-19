@@ -189,6 +189,8 @@ def _resolve_upload_path(file_obj):
 
 async def _on_upload_pdf_async(file_obj):
     """Async core: save to raw, process to processed, return (dropdown, status, page_outputs)."""
+    import time
+    
     no_updates = _no_page_updates()
     src_path, err = _resolve_upload_path(file_obj)
     if err:
@@ -203,23 +205,47 @@ async def _on_upload_pdf_async(file_obj):
 
         # 1) Save to raw folder (data/raw/)
         dest_path = RAW_DIR / original_name
-        shutil.copy(str(src_path), str(dest_path))
-        print(f"📥 Saved to raw: {dest_path}")
+        
+        # Handle case where source and destination are the same file
+        if src_path.resolve() != dest_path.resolve():
+            shutil.copy(str(src_path), str(dest_path))
+            print(f"📥 Saved to raw: {dest_path}")
+        else:
+            print(f"📥 File already in raw: {dest_path}")
 
         # 2) Process: extract text and write to processed folder (data/processed/)
         extractor = PDFExtractor(raw_dir=str(RAW_DIR), processed_dir=str(PROCESSED_DIR))
         results = await extractor.process_pdf(dest_path, skip_text=False, clean=True)
 
+        print(f"[Upload] Results: {results}")
+        
         if results.get("errors"):
             msg = f"❌ Extraction error: {', '.join(results['errors'])}"
             print(f"[Upload] {msg}")
             return gr.update(), msg, no_updates
 
+        if not results.get("text_file"):
+            msg = "⚠ No text file created - text extraction may have failed"
+            print(f"[Upload] {msg}. Results: {results}")
+            return gr.update(), msg, no_updates
+
         print(f"📄 Processed: {results.get('text_file', '—')} in {PROCESSED_DIR}")
 
+        # Verify the text file actually exists before indexing
+        expected_text_file = PROCESSED_DIR / f"{Path(original_name).stem}_text.txt"
+        time.sleep(0.5)  # Small delay to ensure file is fully written
+        if not expected_text_file.exists():
+            msg = f"⚠ Text file not found at {expected_text_file}"
+            print(f"[Upload] {msg}. Files in PROCESSED_DIR: {list(PROCESSED_DIR.glob('*'))}")
+            return gr.update(), msg, no_updates
+        print(f"✓ Verified text file exists: {expected_text_file}")
+
         # 3) Index for QA and refresh document list
+        # Force re-index to include the newly uploaded document
         if _qa_engine:
-            _qa_engine.load_and_index(force_reindex=False)
+            print(f"[Upload] Calling load_and_index(force_reindex=True)...")
+            _qa_engine.load_and_index(force_reindex=True)
+            print(f"[Upload] Indexing complete, is_indexed={_qa_engine.is_indexed}")
         doc_state.load(original_name)
         new_choices = get_pdf_list()
 
@@ -530,21 +556,33 @@ def on_discard_table(state: dict, idx: int):
 
 
 def on_save_extracted_table(df: pd.DataFrame, pdf_name: str, page_num: int,
-                            state: dict, idx: int):
+                            state: dict, idx: int, table_name: str = ""):
     if df is None or (hasattr(df, 'empty') and df.empty):
         return "⚠ No data to save.", None, gr.Group(visible=False), state, idx, gr.Dropdown(choices=[])
     try:
         base = Path(pdf_name).stem
         pn = int(page_num)
+
+        # Use custom table name if provided, otherwise auto-generate with page number and index
+        if table_name and table_name.strip():
+            # Sanitize the table name: remove special characters, replace spaces with underscores
+            clean_name = re.sub(r'[^\w\-_]', '_', table_name.strip())
+            clean_name = re.sub(r'_+', '_', clean_name)  # Replace multiple underscores with single
+            clean_name = clean_name.strip('_')  # Remove leading/trailing underscores
+            
+            # Calculate next table counter by checking how many are already saved for this page
+            doc_state.table_map.setdefault(pn, [])
+            table_num = len(doc_state.table_map[pn]) + 1
+            csv_file = PROCESSED_DIR / f"{base}_table_{clean_name}_p{pn}_{table_num}.csv"
+        else:
+            # Calculate next table counter by checking how many are already saved for this page
+            doc_state.table_map.setdefault(pn, [])
+            table_num = len(doc_state.table_map[pn]) + 1
+            csv_file = PROCESSED_DIR / f"{base}_table_p{pn}_{table_num}.csv"
         
-        # Calculate next table counter by checking how many are already saved for this page
-        doc_state.table_map.setdefault(pn, [])
-        table_num = len(doc_state.table_map[pn]) + 1
-        
-        csv_file = PROCESSED_DIR / f"{base}_table_p{pn}_{table_num}.csv"
         df.to_csv(csv_file, index=False)
         doc_state.table_map[pn].append(df)
-        
+
         if _qa_engine and hasattr(_qa_engine, 'db_manager'):
             _qa_engine.db_manager.reload_csv(csv_file.name)
         msg = f"✅ Saved {csv_file.name}! "
@@ -940,9 +978,17 @@ with gr.Blocks(
 
                     with gr.Row():
                         prev_table_btn    = gr.Button("◀ Prev",    scale=1, min_width=80)
-                        save_table_btn    = gr.Button("💾 Save",   variant="primary", scale=2)
                         discard_table_btn = gr.Button("Discard",   variant="stop", scale=1, min_width=90)
                         next_table_btn    = gr.Button("Next ▶",    scale=1, min_width=80)
+
+                    table_name_input = gr.Textbox(
+                        label="Table name (optional - leave empty for auto-generated name)",
+                        placeholder="e.g., revenue_summary, production_data, etc.",
+                        value="",
+                    )
+
+                    with gr.Row():
+                        save_table_btn    = gr.Button("💾 Save",   variant="primary", scale=2)
 
         # ════════════════ RIGHT — Chat ════════════════
         with gr.Column(scale=7, elem_id="chat-panel"):
@@ -1020,7 +1066,7 @@ with gr.Blocks(
     )
     save_table_btn.click(
         fn=on_save_extracted_table,
-        inputs=[editable_table, pdf_dropdown, page_slider, extracted_tables_state, table_idx_state],
+        inputs=[editable_table, pdf_dropdown, page_slider, extracted_tables_state, table_idx_state, table_name_input],
         outputs=[extract_status, editable_table, extract_group, extracted_tables_state, table_idx_state, col_to_delete],
     ).then(fn=on_page_change, inputs=[page_slider, pdf_dropdown], outputs=shared_outputs)
 

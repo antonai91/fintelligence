@@ -111,14 +111,17 @@ class QAEngine:
         
     def load_and_index(self, force_reindex: bool = False):
         """Load PDFs and build the index (with smart caching)"""
-        
+
+        print(f"\n[QA Engine] load_and_index called with force_reindex={force_reindex}")
+        print(f"[QA Engine] data_dir={self.data_dir}, is_indexed={self.is_indexed}")
+
         # Try to load existing index
         if not force_reindex and self.search_engine.load_existing_index():
             print("\n✓ Loaded existing index from disk")
-            
+
             # Check if files have changed
             needs_reindex, changed_files = self._check_if_reindex_needed()
-            
+
             if not needs_reindex:
                 print("✓ All files are up to date, no re-indexing needed!")
                 self.is_indexed = True
@@ -130,13 +133,16 @@ class QAEngine:
                 if len(changed_files) > 5:
                     print(f"  ... and {len(changed_files) - 5} more")
                 print("\nRe-indexing all documents...")
-        
+
         # Full indexing
         print("Loading documents...")
         documents = self.processor.extract_text_from_directory(self.data_dir)
-        
+
+        print(f"[QA Engine] Loaded {len(documents)} document chunks")
+
         if not documents:
             print("No documents found to index.")
+            self.is_indexed = True  # Still mark as indexed to allow QA
             return
         
         # Get current file hashes
